@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kalshi Claude Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">K×C</span>
+    <div>
+      <div class="brand-name">Kalshi Claude Desk</div>
+      <div class="brand-sub">Paper trading · 15-minute crypto markets</div>
+    </div>
+  </div>
+  <div class="engine">
+    <label class="field compact">
+      <span>Strategy</span>
+      <select id="q-strategy"></select>
+    </label>
+    <label class="field compact claude-only">
+      <span>Model</span>
+      <select id="q-model"></select>
+    </label>
+    <div class="field compact claude-only">
+      <span>Effort</span>
+      <div class="seg" id="q-effort"></div>
+    </div>
+  </div>
+  <div class="pills">
+    <span class="pill" id="pill-live"><i class="dot"></i><span>Live off</span></span>
+    <span class="pill" id="pill-usage">— calls today</span>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="backtest" role="tab">Backtest</button>
+  <button class="tab" data-tab="live" role="tab">Live paper</button>
+  <button class="tab" data-tab="usage" role="tab">Usage</button>
+  <button class="tab" data-tab="settings" role="tab">Settings</button>
+</nav>
+
+<main>
+<!-- ============================== BACKTEST ============================== -->
+<section id="tab-backtest" class="tab-panel active">
+  <div class="grid-2">
+    <div class="card">
+      <h2>New backtest</h2>
+      <p class="muted small">Replays settled Kalshi markets using the bid/ask that existed at decision time. Uses the strategy, model and effort from the top bar and sizing from Settings.</p>
+      <div class="form-grid">
+        <label class="field"><span>From</span><input type="date" id="bt-start"></label>
+        <label class="field"><span>To</span><input type="date" id="bt-end"></label>
+        <label class="field"><span>Markets</span><input type="number" id="bt-count" min="1" max="3000" value="50"></label>
+        <label class="field"><span>Sampling</span>
+          <select id="bt-sample">
+            <option value="random">Random across range</option>
+            <option value="latest">Most recent</option>
+            <option value="all">Every market (cap 3000)</option>
+          </select>
+        </label>
+        <label class="field"><span>Decide at (min left)</span><input type="number" id="bt-delay" min="0.5" max="15" step="0.5"></label>
+        <label class="field"><span>Random seed</span><input type="number" id="bt-seed" value="1"></label>
+        <div class="field span-2"><span>Assets</span><div class="chips" id="bt-assets"></div></div>
+        <label class="field span-2"><span>Run name (optional)</span><input type="text" id="bt-name" maxlength="80" placeholder="e.g. sonnet medium, 10 min"></label>
+      </div>
+      <div class="estimate" id="bt-estimate">Estimating…</div>
+      <div class="row gap">
+        <button class="btn primary" id="bt-run">Run backtest</button>
+        <button class="btn ghost hidden" id="bt-cancel">Cancel</button>
+      </div>
+      <div class="progress hidden" id="bt-progress">
+        <div class="progress-bar"><div id="bt-progress-fill"></div></div>
+        <div class="small muted" id="bt-progress-text"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <h2>Runs</h2>
+        <span class="small muted">Tick up to 3 to compare equity curves</span>
+      </div>
+      <div class="table-wrap runs-wrap">
+        <table class="table" id="runs-table">
+          <thead><tr><th></th><th>Run</th><th>Engine</th><th class="num">Mkts</th><th class="num">Trades</th><th class="num">Win %</th><th class="num">Net PnL</th><th class="num">Brier vs mkt</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="bt-detail" class="hidden">
+    <div class="card">
+      <div class="row between wrap">
+        <div>
+          <h2 id="d-title">Run</h2>
+          <div class="small muted" id="d-sub"></div>
+        </div>
+        <div class="verdict" id="d-verdict"></div>
+      </div>
+      <div class="tiles" id="d-tiles"></div>
+    </div>
+
+    <div class="grid-2 wide-left">
+      <div class="card">
+        <div class="row between">
+          <h3>Equity</h3>
+          <div class="legend" id="eq-legend"></div>
+        </div>
+        <div class="chart-box"><canvas id="eq-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="row between">
+          <h3>Calibration</h3>
+          <button class="btn tiny ghost" id="cal-toggle">Table</button>
+        </div>
+        <p class="small muted">Model's P(up) vs how often UP actually happened. On the diagonal = honest probabilities.</p>
+        <div class="chart-box short" id="cal-chart-box"><canvas id="cal-chart"></canvas></div>
+        <div class="table-wrap hidden" id="cal-table-wrap"><table class="table" id="cal-table"></table></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row between wrap">
+        <h3>Decisions</h3>
+        <div class="seg" id="dec-filter">
+          <button data-f="all" class="on">All</button><button data-f="trades">Trades</button><button data-f="wins">Wins</button><button data-f="losses">Losses</button><button data-f="skips">Skips</button>
+        </div>
+      </div>
+      <div class="table-wrap tall">
+        <table class="table" id="dec-table">
+          <thead><tr><th>Time</th><th>Asset</th><th>Call</th><th class="num">P(up)</th><th class="num">Mkt</th><th>Outcome</th><th>Trade</th><th class="num">PnL</th><th>Reason</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== LIVE ============================== -->
+<section id="tab-live" class="tab-panel">
+  <div class="card">
+    <div class="row between wrap">
+      <div>
+        <h2>Live paper trading</h2>
+        <p class="small muted">Trades today's open markets with fake money. Uses the top-bar strategy/model/effort at each decision. Keep this window open and the PC awake.</p>
+      </div>
+      <div class="row gap">
+        <button class="btn primary" id="live-start">Start</button>
+        <button class="btn ghost" id="live-stop">Stop</button>
+        <button class="btn ghost danger" id="live-reset">Reset account</button>
+      </div>
+    </div>
+    <div class="tiles" id="live-tiles"></div>
+    <div class="asset-status" id="live-assets"></div>
+  </div>
+  <div class="grid-2 wide-left">
+    <div class="card">
+      <h3>Equity</h3>
+      <div class="chart-box"><canvas id="live-chart"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>Activity</h3>
+      <div class="feed" id="live-feed"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Open positions</h3>
+    <div class="table-wrap"><table class="table" id="live-pos"></table></div>
+  </div>
+  <div class="card">
+    <h3>Decisions this session</h3>
+    <div class="table-wrap tall"><table class="table" id="live-dec"></table></div>
+  </div>
+</section>
+
+<!-- ============================== USAGE ============================== -->
+<section id="tab-usage" class="tab-panel">
+  <div class="card">
+    <h2>Claude usage</h2>
+    <p class="small muted">Every model call runs through the Claude Code CLI on your subscription. There's no API bill; calls count toward your plan's usage limits. "API-equivalent" is what the same tokens would cost on the paid API, for comparison only.</p>
+    <div class="tiles" id="u-tiles"></div>
+    <div class="notice hidden" id="u-limit"></div>
+  </div>
+  <div class="grid-2 wide-left">
+    <div class="card">
+      <h3>Tokens per day</h3>
+      <div class="chart-box short"><canvas id="u-chart"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>By model and effort</h3>
+      <div class="table-wrap"><table class="table" id="u-combos"></table></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Recent calls</h3>
+    <div class="table-wrap tall"><table class="table" id="u-recent"></table></div>
+  </div>
+</section>
+
+<!-- ============================== SETTINGS ============================== -->
+<section id="tab-settings" class="tab-panel">
+  <div class="grid-2">
+    <div class="card">
+      <h2>Account and sizing</h2>
+      <div class="form-grid">
+        <label class="field"><span>Starting bankroll ($)</span><input type="number" id="s-bankroll" min="1" step="1"></label>
+        <label class="field"><span>Sizing</span><select id="s-sizing"></select></label>
+        <label class="field sz sz-fixed"><span>Dollars per trade</span><input type="number" id="s-fixed_stake" min="1" step="1"></label>
+        <label class="field sz sz-percent"><span>% of equity per trade</span><input type="number" id="s-percent_stake" min="0.1" step="0.1"></label>
+        <label class="field sz sz-kelly"><span>Kelly fraction</span><input type="number" id="s-kelly_fraction" min="0.05" max="1" step="0.05"></label>
+        <label class="field"><span>Max per trade (% equity)</span><input type="number" id="s-max_stake_pct" min="0.1" step="0.5"></label>
+        <label class="field"><span>Max price per contract</span><input type="number" id="s-max_price" min="0.05" max="0.99" step="0.01"></label>
+        <label class="field"><span>Backtest slippage ($/contract)</span><input type="number" id="s-slippage" min="0" max="0.1" step="0.005"></label>
+        <label class="field"><span>Daily profit stop ($, 0 = off)</span><input type="number" id="s-max_daily_profit" min="0" step="10"></label>
+        <label class="field"><span>Daily loss stop ($, 0 = off)</span><input type="number" id="s-max_daily_loss" max="0" step="10"></label>
+        <label class="check"><input type="checkbox" id="s-simulate_fees"> Charge Kalshi taker fees</label>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Strategy</h2>
+      <div class="form-grid">
+        <label class="field"><span>Decide at (minutes left)</span><input type="number" id="s-time_delay" min="0.5" max="15" step="0.5"></label>
+        <label class="field"><span>Min edge (no-AI strategies)</span><input type="number" id="s-min_edge" min="0" max="0.5" step="0.01"></label>
+        <label class="field"><span>Parallel Claude calls (backtests)</span><input type="number" id="s-parallel_calls" min="1" max="6" step="1"></label>
+        <label class="check"><input type="checkbox" id="s-obey_model"> Follow the model (off = trade the opposite)</label>
+        <div class="field span-2"><span>Live assets</span><div class="chips" id="s-assets"></div></div>
+        <label class="field span-2"><span>Strategy notes sent to Claude</span><textarea id="s-instructions" rows="7"></textarea></label>
+      </div>
+    </div>
+  </div>
+  <div class="row gap"><button class="btn primary" id="s-save">Save settings</button><span class="small muted" id="s-status"></span></div>
+  <p class="small muted">Claude CLI: <code id="s-cli"></code></p>
+</section>
+</main>
+
+<div class="toast hidden" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
