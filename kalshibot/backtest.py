@@ -108,6 +108,23 @@ class Run:
 
     def progress(self, msg):
         self.message = msg
+        self.beat()
+
+    def beat(self, force=False):
+        """Share progress through a file so a dashboard in another process can show and cancel this run."""
+        now = time.time()
+        if not force and now - getattr(self, "_last_beat", 0) < 1.5:
+            return
+        self._last_beat = now
+        if (storage.BACKTESTS / f"{self.id}.cancel").exists():
+            self.cancelled = True
+        storage.write_json(storage.BACKTESTS / f"{self.id}.progress", {**self.info(), "beat": now})
+
+    def clear_beat(self):
+        for suffix in (".progress", ".cancel"):
+            path = storage.BACKTESTS / f"{self.id}{suffix}"
+            if path.exists():
+                path.unlink()
 
     # ------------------------------------------------------------ phases
 
@@ -120,6 +137,7 @@ class Run:
                 break
             self.done += 1
             self.message = f"Loading market data {self.done}/{self.total}"
+            self.beat()
             close_ts = markets.ts(m["close_time"])
             decision_ts = close_ts - delay
             candles = markets.market_candles(m["asset"], m["ticker"], m["open_time"], m["close_time"])
@@ -156,9 +174,10 @@ class Run:
                 elif isinstance(err, claude_cli.ClaudeError):
                     self.calls["errors"] += 1
                     item["error"] = str(err)
-                    if err.kind in ("limit", "auth", "missing") and not stop_reason:
+                    if err.kind in ("limit", "auth", "missing", "model_mismatch") and not stop_reason:
                         stop_reason = str(err)
                 self.message = f"Deciding {self.done}/{self.total}"
+                self.beat()
         return stop_reason
 
     def simulate(self, items):
@@ -257,6 +276,8 @@ class Run:
         except Exception as e:
             self.status, self.message = "error", f"{e}"
             traceback.print_exc()
+        finally:
+            self.clear_beat()
 
     @staticmethod
     def cfg_start_ts(pool):
@@ -264,10 +285,10 @@ class Run:
 
 
 def start(p):
+    busy = active()
+    if busy:
+        raise RuntimeError(f"Backtest {busy[0]['id']} is still running. Cancel it or wait for it to finish.")
     with _runs_lock:
-        busy = [r for r in _runs.values() if r.status in ("queued", "loading", "deciding", "simulating")]
-        if busy:
-            raise RuntimeError(f"Backtest {busy[0].id} is still running.")
         cfg, params = normalize_params(p)
         run = Run(cfg, params)
         _runs[run.id] = run
@@ -275,21 +296,41 @@ def start(p):
     return run
 
 
+ACTIVE = ("queued", "loading", "deciding", "simulating")
+
+
+def _external_runs():
+    """Runs started by another process (e.g. the terminal) that are still sending heartbeats."""
+    out = []
+    for path in storage.BACKTESTS.glob("*.progress"):
+        info = storage.read_json(path)
+        if info and time.time() - info.get("beat", 0) < 60 and info["id"] not in _runs:
+            out.append(info)
+    return out
+
+
 def active():
     with _runs_lock:
-        return [r.info() for r in _runs.values() if r.status in ("queued", "loading", "deciding", "simulating")]
+        mine = [r.info() for r in _runs.values() if r.status in ACTIVE]
+    return mine + _external_runs()
 
 
 def status(run_id):
     r = _runs.get(run_id)
-    return r.info() if r else None
+    if r:
+        return r.info()
+    return storage.read_json(storage.BACKTESTS / f"{run_id}.progress")
 
 
 def cancel(run_id):
     r = _runs.get(run_id)
     if r:
         r.cancelled = True
-    return bool(r)
+        return True
+    if (storage.BACKTESTS / f"{run_id}.progress").exists():
+        (storage.BACKTESTS / f"{run_id}.cancel").write_text("cancel")
+        return True
+    return False
 
 
 def list_saved():

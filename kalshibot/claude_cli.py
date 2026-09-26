@@ -33,14 +33,29 @@ SCHEMA = {
 LEAN_FLAGS = ["--tools", "", "--no-session-persistence", "--strict-mcp-config",
               "--setting-sources", "", "--disable-slash-commands"]
 
+# Exact IDs: an inherited environment can remap the short aliases (we caught "sonnet" running as Haiku).
+MODEL_IDS = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-5",
+    "opus": "claude-opus-5-5",
+    "fable": "claude-fable-5-1",
+}
+
 _cache_lock = threading.Lock()
 _cache = None
+
+
+def clean_env():
+    """Parent environment minus Claude Code session variables that can change model or behavior."""
+    keep = {"CLAUDE_CONFIG_DIR", "CLAUDE_BIN"}
+    return {k: v for k, v in os.environ.items()
+            if k in keep or not (k.startswith("CLAUDE_") or k.startswith("ANTHROPIC_"))}
 
 
 class ClaudeError(RuntimeError):
     def __init__(self, message, kind="error"):
         super().__init__(message)
-        self.kind = kind  # error | limit | auth | missing
+        self.kind = kind  # error | limit | auth | missing | model_mismatch
 
 
 def find_claude():
@@ -64,7 +79,7 @@ def find_claude():
 
 
 def _key(model, effort, prompt):
-    return hashlib.sha256(f"{model}|{effort}|{SYSTEM_PROMPT}|{prompt}".encode()).hexdigest()[:24]
+    return hashlib.sha256(f"{MODEL_IDS.get(model, model)}|{effort}|{SYSTEM_PROMPT}|{prompt}".encode()).hexdigest()[:24]
 
 
 def _load_cache():
@@ -92,14 +107,15 @@ def decide(prompt, model, effort, source, use_cache=True):
     if not claude:
         raise ClaudeError("Claude Code CLI not found. Install it or set CLAUDE_BIN.", "missing")
 
-    cmd = [claude, "-p", "--model", model, "--effort", effort, "--output-format", "json",
+    wanted = MODEL_IDS.get(model, model)
+    cmd = [claude, "-p", "--model", wanted, "--effort", effort, "--output-format", "json",
            "--json-schema", json.dumps(SCHEMA), "--system-prompt", SYSTEM_PROMPT, *LEAN_FLAGS]
     t0 = time.time()
     record = {"time": time.time(), "model": model, "effort": effort, "source": source, "ok": False}
     try:
         # An empty temp dir keeps any project CLAUDE.md out of the decision.
         with tempfile.TemporaryDirectory() as tmp:
-            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, env=clean_env(),
                                   encoding="utf-8", errors="replace", timeout=300, cwd=tmp)
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
@@ -111,9 +127,12 @@ def decide(prompt, model, effort, source, use_cache=True):
             raise ClaudeError(f"Unreadable CLI output: {(out or err)[:300]}")
 
         usage = env.get("usage") or {}
-        model_ids = list((env.get("modelUsage") or {}).keys())
+        per_model = env.get("modelUsage") or {}
+        # The model that wrote the answer is the one with the most output tokens.
+        main = max(per_model, key=lambda k: per_model[k].get("outputTokens", 0)) if per_model else None
         record.update({
-            "model_id": model_ids[0] if model_ids else None,
+            "model_id": main,
+            "models_used": sorted(per_model),
             "input_tokens": usage.get("input_tokens", 0),
             "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
             "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
@@ -125,6 +144,9 @@ def decide(prompt, model, effort, source, use_cache=True):
             msg = str(env.get("result") or env.get("terminal_reason") or "unknown error")
             kind = "limit" if "limit" in msg.lower() else "error"
             raise ClaudeError(msg[:300], kind)
+        if main and main != wanted:
+            # Never let a silent model swap into the results.
+            raise ClaudeError(f"Asked for {wanted} but {main} answered", "model_mismatch")
 
         decision = env.get("structured_output")
         if not isinstance(decision, dict):

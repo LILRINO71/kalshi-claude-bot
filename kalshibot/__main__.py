@@ -10,15 +10,23 @@ from . import backtest, config, storage, usage
 
 
 def cmd_dashboard(args):
+    import socket
     from .web.app import serve
     url = f"http://127.0.0.1:{args.port}"
+    with socket.socket() as sock:
+        if sock.connect_ex(("127.0.0.1", args.port)) == 0:
+            print(f"Dashboard is already running at {url}; opening it.")
+            if not args.no_browser:
+                webbrowser.open(url)
+            return
     if not args.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     serve(port=args.port)
 
 
 def cmd_backtest(args):
-    params = {"count": args.count, "sample": args.sample, "start": args.start, "end": args.end, "seed": args.seed}
+    params = {"count": args.count, "sample": args.sample, "start": args.start, "end": args.end, "seed": args.seed,
+              "name": args.name}
     for key in ("strategy", "model", "effort"):
         if getattr(args, key):
             params[key] = getattr(args, key)
@@ -96,6 +104,7 @@ def main(argv=None):
     b.add_argument("--model", choices=list(config.MODELS))
     b.add_argument("--effort", choices=config.EFFORTS)
     b.add_argument("--assets", nargs="+")
+    b.add_argument("--name", default="")
 
     sub.add_parser("live", help="live paper trading without the dashboard")
     t = sub.add_parser("test", help="ask Claude about the current market once")

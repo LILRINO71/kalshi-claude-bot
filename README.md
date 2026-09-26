@@ -7,6 +7,16 @@ ProcessOverProfit's [Kalshi AI trading bot](https://code.processoverprofit.blog/
 
 ![stack](https://img.shields.io/badge/python-3.10%2B-blue) ![mode](https://img.shields.io/badge/mode-paper%20only-green)
 
+## One-click start (Windows)
+
+1. On GitHub, click **Code → Download ZIP** and unzip it (or `git clone` it).
+2. Double-click **`Start Kalshi Desk.bat`**. It installs the requirements the first time, starts the dashboard and
+   opens http://127.0.0.1:8050 in your browser. Keep that window open; close it to stop.
+3. First time only: log the Claude Code CLI in to your Claude subscription (`claude`, then `/login`).
+
+Tip: right-click the .bat → *Send to → Desktop (create shortcut)* for a one-click icon. Double-clicking again while
+it's running just reopens the page.
+
 ## What it does
 
 - **Backtests on real history.** Replays settled Kalshi markets (back to July 2026) using the exact bid/ask that existed
