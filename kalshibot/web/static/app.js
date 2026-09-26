@@ -62,11 +62,12 @@ async function init() {
   renderChips($("#bt-assets"), SETTINGS.assets);
   renderChips($("#s-assets"), SETTINGS.assets);
   $("#bt-delay").value = SETTINGS.time_delay;
+  $("#bt-idx-delay").value = SETTINGS.index_time_delay;
   $("#bt-end").value = new Date().toISOString().slice(0, 10);
   $("#bt-start").value = "2026-07-19";
   syncTop();
   fillSettingsForm();
-  ["#bt-start", "#bt-end", "#bt-count", "#bt-sample", "#bt-seed", "#bt-delay"].forEach((s) => $(s).addEventListener("input", estimateSoon));
+  ["#bt-start", "#bt-end", "#bt-count", "#bt-sample", "#bt-seed", "#bt-delay", "#bt-idx-delay"].forEach((s) => $(s).addEventListener("input", estimateSoon));
   let tab = "backtest";
   try { tab = localStorage.getItem("tab") || tab; } catch (e) {}
   showTab(tab);
@@ -82,7 +83,10 @@ function fillSelect(sel, options, value) {
 }
 
 function renderChips(box, selected) {
-  box.innerHTML = META.assets.map((a) => `<button type="button" class="chip ${selected.includes(a) ? "on" : ""}" data-a="${a}">${a}</button>`).join("");
+  box.innerHTML = META.assets.map((a, i) => {
+    const gap = a === META.indices[0] ? `<span class="chip-sep">Stocks</span>` : i === 0 ? `<span class="chip-sep">Crypto</span>` : "";
+    return `${gap}<button type="button" class="chip ${selected.includes(a) ? "on" : ""}" data-a="${a}">${esc(META.labels[a])}</button>`;
+  }).join("");
   $$(".chip", box).forEach((c) => c.addEventListener("click", () => {
     c.classList.toggle("on");
     if (!$$(".chip.on", box).length) c.classList.add("on");
@@ -109,7 +113,7 @@ async function saveQuick(patch) {
 }
 
 const S_FIELDS = ["bankroll", "fixed_stake", "percent_stake", "kelly_fraction", "max_stake_pct", "max_price", "slippage",
-  "max_daily_profit", "max_daily_loss", "time_delay", "min_edge", "parallel_calls"];
+  "max_daily_profit", "max_daily_loss", "time_delay", "index_time_delay", "min_edge", "parallel_calls"];
 function fillSettingsForm() {
   S_FIELDS.forEach((k) => $("#s-" + k).value = SETTINGS[k]);
   $("#s-simulate_fees").checked = SETTINGS.simulate_fees;
@@ -134,6 +138,7 @@ $("#s-save").addEventListener("click", async () => {
     SETTINGS = await api("/api/settings", { method: "POST", body });
     fillSettingsForm();
     $("#bt-delay").value = SETTINGS.time_delay;
+    $("#bt-idx-delay").value = SETTINGS.index_time_delay;
     $("#s-status").textContent = "Saved " + new Date().toLocaleTimeString();
     estimateSoon();
   } catch (e) { $("#s-status").textContent = e.message; }
@@ -156,7 +161,7 @@ function btParams() {
   return {
     start: $("#bt-start").value, end: $("#bt-end").value, count: +$("#bt-count").value,
     sample: $("#bt-sample").value, seed: +$("#bt-seed").value, name: $("#bt-name").value,
-    assets: chipValues($("#bt-assets")), time_delay: +$("#bt-delay").value,
+    assets: chipValues($("#bt-assets")), time_delay: +$("#bt-delay").value, index_time_delay: +$("#bt-idx-delay").value,
     strategy: SETTINGS.strategy, model: SETTINGS.model, effort: SETTINGS.effort,
   };
 }
@@ -242,7 +247,7 @@ async function loadRuns() {
     const skill = s.brier_skill_vs_market;
     return `<tr class="clickable ${current === r.id ? "selected" : ""}" data-id="${r.id}">
       <td><input type="checkbox" class="cmp" data-id="${r.id}" ${compare.has(r.id) ? "checked" : ""} aria-label="compare"></td>
-      <td>${esc(label)}<div class="small muted">${esc((r.assets || []).join(" "))} · ${r.time_delay}m · ${esc(r.sizing || "")}</div></td>
+      <td>${esc(label)}<div class="small muted">${esc((r.assets || []).map((a) => META.labels[a] || a).join(", "))} · ${esc(r.sizing || "")}</div></td>
       <td>${esc(engine)}</td>
       <td class="num">${s.markets}</td><td class="num">${s.trades}</td>
       <td class="num">${pct(s.win_rate, 0)}</td>
@@ -282,7 +287,9 @@ async function openRun(id) {
   const s = r.summary, c = r.config;
   const engine = r.strategy === "claude" ? `Claude ${r.model} · ${r.effort} effort` : META.strategies[r.strategy];
   $("#d-title").textContent = r.params?.name || engine;
-  $("#d-sub").textContent = `${engine} · ${c.assets.join(", ")} · decide at ${c.time_delay} min left · ${META.sizing[c.sizing]} · ${r.params.start} → ${r.params.end} (${r.params.sample}) · ${r.message || ""}`;
+  const timing = [c.assets.some((a) => !META.indices.includes(a)) ? `crypto at ${c.time_delay}m left` : "",
+    c.assets.some((a) => META.indices.includes(a)) ? `stocks at ${c.index_time_delay ?? 15}m left` : ""].filter(Boolean).join(", ");
+  $("#d-sub").textContent = `${engine} · ${c.assets.map((a) => META.labels[a] || a).join(", ")} · ${timing} · ${META.sizing[c.sizing]} · ${r.params.start.startsWith("2000") ? "all dates" : r.params.start + " → " + r.params.end} (${r.params.sample}) · ${r.message || ""}`;
   const v = $("#d-verdict");
   const tone = s.verdict.startsWith("Profit") ? "good" : s.verdict.startsWith("Losing") ? "bad" : "warn";
   v.className = "verdict " + tone;
@@ -409,7 +416,7 @@ function decisionRow(d, tsKey = "decision_ts") {
   const pnl = t && t.pnl != null ? `<span class="${cls(t.pnl)}">${money(t.pnl, true)}</span>` : "";
   const result = t && t.won != null ? `<span class="tag ${t.won ? "won" : "lost"}">${t.won ? "WON" : "LOST"}</span> ` : "";
   const dir = d.direction;
-  return `<tr><td class="num">${when(d[tsKey])}</td><td>${esc(d.asset)}</td>
+  return `<tr><td class="num">${when(d[tsKey])}</td><td>${esc(META.labels[d.asset] || d.asset)}${META.indices.includes(d.asset) ? `<div class="small muted">&gt; ${esc(d.strike)}</div>` : ""}</td>
     <td><span class="tag ${dir === "UP" ? "up" : dir === "DOWN" ? "down" : ""}">${esc(dir)}</span></td>
     <td class="num">${num(d.probability_up, 2)}</td><td class="num">${num(d.market_up, 2)}</td>
     <td>${result}${esc(actual)}</td><td>${tradeCell}</td><td class="num">${pnl}</td>

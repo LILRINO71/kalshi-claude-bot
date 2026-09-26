@@ -123,15 +123,18 @@ class LiveTrader:
             self.waiting[asset] = "waiting for market data"
             return
         tk = m["ticker"]
+        # One decision per session: for index ladders the nearest strike can change after we decide.
+        session = m.get("event_ticker") or tk
         close_ts = markets.ts(m["close_time"])
         mins_left = (close_ts - time.time()) / 60
-        if tk in self.decided:
-            row = self.decided[tk]
+        row = next((r for r in self.decided.values() if r.get("session", r["ticker"]) == session), None)
+        if row:
             self.waiting[asset] = (f"holding {row['trade']['side']} until close ({mins_left:.1f}m)" if row.get("trade")
                                    else f"{row['direction']} this session; next in {max(0, mins_left):.1f}m")
             return
-        if mins_left > cfg["time_delay"]:
-            self.waiting[asset] = f"deciding in {mins_left - cfg['time_delay']:.1f}m"
+        delay = config.decision_delay(cfg, asset)
+        if mins_left > delay:
+            self.waiting[asset] = f"deciding in {mins_left - delay:.1f}m"
             return
         if mins_left < 0.5:
             self.waiting[asset] = "too late in this session"
@@ -146,7 +149,7 @@ class LiveTrader:
             return
 
         self.waiting[asset] = "asking model..."
-        row = {"ticker": tk, "asset": asset, "close_ts": close_ts, "decision_ts": now_ts,
+        row = {"ticker": tk, "session": session, "asset": asset, "close_ts": close_ts, "decision_ts": now_ts,
                "strategy": cfg["strategy"], "model": cfg["model"], "effort": cfg["effort"],
                "up_ask": s.up_ask, "down_ask": s.down_ask, "market_up": s.market_prob_up,
                "baseline_up": s.features["baseline_up"], "spot": s.spot, "strike": s.strike,

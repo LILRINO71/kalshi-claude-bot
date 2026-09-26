@@ -75,9 +75,23 @@ python bot.py test                                             # one Claude deci
 python bot.py usage
 ```
 
+## Markets it trades
+
+| Market | Kalshi series | Question | Spot data | Backtest history |
+|---|---|---|---|---|
+| BTC, ETH, SOL, XRP, DOGE, HYPE, BNB | `KX{COIN}15M` | Will the 60-second average at close be at or above the average at open? (every 15 min, 24/7) | Coinbase 1-minute candles | back to July 19, 2026 |
+| S&P 500 | `KXINXU` | Will the index be above strike K at the top of the hour? (hourly, market hours) | Yahoo `^GSPC` 1-minute | last ~29 days |
+| Nasdaq-100 | `KXNASDAQ100U` | Same, for the Nasdaq-100 | Yahoo `^NDX` 1-minute | last ~29 days |
+
+Kalshi has no recurring price markets on individual stocks (Apple, Tesla and similar only appear as one-off
+earnings/KPI questions), so the stock side trades the index ladders. Each hour has about 60 strikes; the bot trades the
+strike nearest the index level at decision time, which is the most balanced and usually the most liquid. Its 15-minute
+S&P and Nasdaq series currently list no markets. The hourly Dow (`KXDJI`) is left out because it settles on a US30
+CFD price, not the index Yahoo publishes.
+
 ## How a decision works
 
-At `time_delay` minutes before close (default 10), the strategy gets the strike, the Kalshi bid/ask for UP and DOWN,
+At `time_delay` minutes before close (default 10 for crypto; `index_time_delay`, default 15, for stocks), the strategy gets the strike, the Kalshi bid/ask for UP and DOWN,
 spot price vs. strike, 1/5/15/60-minute moves, 1-minute volatility, the last 15 closes, and a random-walk probability.
 Claude returns `UP`, `DOWN` or `SKIP` plus its own P(up) and a reason, as structured JSON. Positions are held to
 Kalshi's official settlement.

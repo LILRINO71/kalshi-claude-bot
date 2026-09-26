@@ -24,6 +24,7 @@ def meta():
     return jsonify({
         "models": config.MODELS, "efforts": config.EFFORTS, "strategies": config.STRATEGIES,
         "sizing": config.SIZING, "assets": config.ASSETS, "defaults": config.DEFAULTS,
+        "labels": config.LABELS, "indices": list(config.INDICES),
         "claude_path": claude_cli.find_claude(),
     })
 

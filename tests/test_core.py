@@ -132,3 +132,36 @@ def test_backtest_simulation_end_to_end(monkeypatch):
     assert summary["trades"] == 3 and summary["wins"] == 2
     assert not acct.positions
     assert acct.cash == pytest.approx(1000 + summary["net_pnl"], abs=0.01)
+
+
+# ---------------------------------------------------------------- stock indices
+
+def test_first_minute_quote_never_comes_from_the_future():
+    candles = [{"end": 600, "ask_open": 0.4, "ask_close": 0.45, "bid_open": 0.38, "bid_close": 0.43}]
+    assert markets.historical_quote(candles, 100) is None          # that minute started at 540, after t=100
+    assert markets.historical_quote(candles, 560)["up_ask"] == 0.4  # minute in progress may lend its open
+    assert markets.historical_quote(candles, 3000, max_age=1800) is None  # stale quote rejected
+
+
+def test_index_prompt_and_delay():
+    s = make_snap()
+    s.asset = "SPX"
+    p = snapshot.prompt(s, "")
+    assert "S&P 500" in p and "hourly" in p and "KXBTC" not in p
+    c = cfg(time_delay=10, index_time_delay=20)
+    assert config.decision_delay(c, "SPX") == 20 and config.decision_delay(c, "BTC") == 10
+
+
+def test_index_event_picks_nearest_quoted_strike(monkeypatch):
+    close = 36000
+    spot = [[close - 900 - 60 * i, 0, 0, 0, 7000.0, 0] for i in range(40, 0, -1)]
+    monkeypatch.setattr(markets, "spot_candles", lambda a, t, m=90: spot)
+    quoted = {"T7000": [{"end": close - 1000, "ask_open": .5, "ask_close": .52, "bid_open": .48, "bid_close": .5}],
+              "T7010": [{"end": close - 1000, "ask_open": .3, "ask_close": .3, "bid_open": .28, "bid_close": .28}]}
+    monkeypatch.setattr(markets, "market_candles", lambda a, tk, o, c: quoted.get(tk, []))
+    event = {"asset": "SPX", "close_time": "1970-01-01T10:00:00Z",
+             "strikes": [{"ticker": t, "floor_strike": k, "result": "yes"} for t, k in
+                         [("T6990", 6990.0), ("T7000", 7000.0), ("T7010", 7010.0)]]}
+    run = backtest.Run(cfg(assets=["SPX"]), {})
+    item = run.load_index_event(event, close, close - 900)
+    assert item["market"]["ticker"] == "T7000" and item["snap"].strike == 7000.0

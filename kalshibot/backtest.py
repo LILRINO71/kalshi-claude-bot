@@ -26,8 +26,17 @@ def _utc_day(iso):
 
 
 def select_markets(assets, start, end, count, sample, seed, progress=None):
+    """Crypto: one entry per 15-minute market. Stock index: one entry per hourly event (strike picked later)."""
     pool = []
     for asset in assets:
+        if config.is_index(asset):
+            if progress:
+                progress(f"Loading {config.LABELS[asset]} market list")
+            for e in markets.index_events(asset):
+                if start <= _utc_day(e["close_time"]) <= end:
+                    pool.append({"asset": asset, "ticker": e["event_ticker"], "close_time": e["close_time"],
+                                 "strikes": e["strikes"], "index": True})
+            continue
         for m in markets.settled_markets(asset, progress):
             if start <= _utc_day(m["close_time"]) <= end and m.get("floor_strike"):
                 pool.append({**m, "asset": asset})
@@ -118,7 +127,10 @@ class Run:
         self._last_beat = now
         if (storage.BACKTESTS / f"{self.id}.cancel").exists():
             self.cancelled = True
-        storage.write_json(storage.BACKTESTS / f"{self.id}.progress", {**self.info(), "beat": now})
+        try:
+            storage.write_json(storage.BACKTESTS / f"{self.id}.progress", {**self.info(), "beat": now})
+        except OSError:
+            pass  # progress display is best-effort; never let it kill a run
 
     def clear_beat(self):
         for suffix in (".progress", ".cancel"):
@@ -131,7 +143,6 @@ class Run:
     def load(self, pool):
         self.status, self.total, self.done = "loading", len(pool), 0
         items = []
-        delay = int(self.cfg["time_delay"] * 60)
         for m in pool:
             if self.cancelled:
                 break
@@ -139,7 +150,12 @@ class Run:
             self.message = f"Loading market data {self.done}/{self.total}"
             self.beat()
             close_ts = markets.ts(m["close_time"])
-            decision_ts = close_ts - delay
+            decision_ts = close_ts - int(config.decision_delay(self.cfg, m["asset"]) * 60)
+            if m.get("index"):
+                item = self.load_index_event(m, close_ts, decision_ts)
+                if item:
+                    items.append(item)
+                continue
             candles = markets.market_candles(m["asset"], m["ticker"], m["open_time"], m["close_time"])
             if not candles:
                 continue
@@ -149,6 +165,24 @@ class Run:
             if s:
                 items.append({"market": m, "snap": s, "candles": candles})
         return items
+
+    def load_index_event(self, event, close_ts, decision_ts):
+        """Pick the strike nearest the index level at decision time that had a live two-sided quote."""
+        asset = event["asset"]
+        spot = markets.spot_candles(asset, decision_ts, 90)
+        if not spot:
+            return None
+        level = spot[-1][4]
+        start_iso = datetime.fromtimestamp(close_ts - 3 * 3600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for k in sorted(event["strikes"], key=lambda k: abs(k["floor_strike"] - level))[:3]:
+            candles = markets.market_candles(asset, k["ticker"], start_iso, event["close_time"]) or []
+            q = markets.historical_quote(candles, decision_ts, max_age=1800)
+            if not q or not 0.03 <= q["up_ask"] <= 0.97:
+                continue
+            s = snapshot.build(asset, k["ticker"], close_ts, decision_ts, k["floor_strike"], q, spot)
+            if s:
+                return {"market": {**k, "asset": asset}, "snap": s, "candles": candles}
+        return None
 
     def decide(self, items):
         self.status, self.total, self.done = "deciding", len(items), 0
@@ -281,15 +315,19 @@ class Run:
 
     @staticmethod
     def cfg_start_ts(pool):
-        return markets.ts(pool[0]["open_time"]) if pool else 0
+        if not pool:
+            return 0
+        first = pool[0]
+        return markets.ts(first["open_time"]) if first.get("open_time") else markets.ts(first["close_time"]) - 3600
 
 
 def start(p):
-    busy = active()
+    cfg, params = normalize_params(p)
+    # Free strategies can run any time; only one Claude run at once so usage stays predictable.
+    busy = [r for r in active() if r.get("strategy") == "claude"] if strategies.uses_claude(cfg) else []
     if busy:
-        raise RuntimeError(f"Backtest {busy[0]['id']} is still running. Cancel it or wait for it to finish.")
+        raise RuntimeError(f"Claude backtest {busy[0]['id']} is still running. Cancel it or wait for it to finish.")
     with _runs_lock:
-        cfg, params = normalize_params(p)
         run = Run(cfg, params)
         _runs[run.id] = run
     threading.Thread(target=run.run, daemon=True).start()

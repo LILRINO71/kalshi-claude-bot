@@ -1,6 +1,7 @@
 """File locations and small JSON helpers. Everything lives under data/."""
 import json
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,10 +34,19 @@ def read_json(path, default=None):
 def write_json(path, obj):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{threading.get_ident()}.tmp")
     with _write_lock:
         tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
-        tmp.replace(path)
+        # Windows refuses the swap while another process has the file open; retry briefly.
+        for attempt in range(20):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(0.05)
 
 
 def append_jsonl(path, row):

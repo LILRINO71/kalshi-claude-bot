@@ -63,9 +63,11 @@
             <option value="all">Every market (cap 3000)</option>
           </select>
         </label>
-        <label class="field"><span>Decide at (min left)</span><input type="number" id="bt-delay" min="0.5" max="15" step="0.5"></label>
+        <label class="field"><span>Crypto: decide at (min left of 15)</span><input type="number" id="bt-delay" min="0.5" max="15" step="0.5"></label>
+        <label class="field"><span>Stocks: decide at (min left of 60)</span><input type="number" id="bt-idx-delay" min="1" max="55" step="1"></label>
+        <div class="field span-2"><span>Markets to trade</span><div class="chips" id="bt-assets"></div>
+          <span class="small muted">Crypto: 15-minute up/down. Stocks: hourly S&amp;P 500 / Nasdaq-100 above/below (last ~29 days only: free minute data limit).</span></div>
         <label class="field"><span>Random seed</span><input type="number" id="bt-seed" value="1"></label>
-        <div class="field span-2"><span>Assets</span><div class="chips" id="bt-assets"></div></div>
         <label class="field span-2"><span>Run name (optional)</span><input type="text" id="bt-name" maxlength="80" placeholder="e.g. sonnet medium, 10 min"></label>
       </div>
       <div class="estimate" id="bt-estimate">Estimating…</div>
@@ -224,11 +226,12 @@
     <div class="card">
       <h2>Strategy</h2>
       <div class="form-grid">
-        <label class="field"><span>Decide at (minutes left)</span><input type="number" id="s-time_delay" min="0.5" max="15" step="0.5"></label>
+        <label class="field"><span>Crypto: decide at (min left of 15)</span><input type="number" id="s-time_delay" min="0.5" max="15" step="0.5"></label>
+        <label class="field"><span>Stocks: decide at (min left of 60)</span><input type="number" id="s-index_time_delay" min="1" max="55" step="1"></label>
         <label class="field"><span>Min edge (no-AI strategies)</span><input type="number" id="s-min_edge" min="0" max="0.5" step="0.01"></label>
         <label class="field"><span>Parallel Claude calls (backtests)</span><input type="number" id="s-parallel_calls" min="1" max="6" step="1"></label>
         <label class="check"><input type="checkbox" id="s-obey_model"> Follow the model (off = trade the opposite)</label>
-        <div class="field span-2"><span>Live assets</span><div class="chips" id="s-assets"></div></div>
+        <div class="field span-2"><span>Live markets</span><div class="chips" id="s-assets"></div></div>
         <label class="field span-2"><span>Strategy notes sent to Claude</span><textarea id="s-instructions" rows="7"></textarea></label>
       </div>
     </div>

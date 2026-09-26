@@ -1,8 +1,25 @@
 """Settings shared by the dashboard, backtests and the live paper trader."""
 from . import storage
 
-ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "HYPE", "BNB"]
-SERIES = {a: f"KX{a}15M" for a in ASSETS}
+CRYPTO = ["BTC", "ETH", "SOL", "XRP", "DOGE", "HYPE", "BNB"]
+# Kalshi has no recurring single-stock price markets; these hourly index ladders are the stock markets that trade.
+INDICES = {
+    "SPX": {"series": "KXINXU", "label": "S&P 500", "yahoo": "^GSPC"},
+    "NDX": {"series": "KXNASDAQ100U", "label": "Nasdaq-100", "yahoo": "^NDX"},
+}
+ASSETS = CRYPTO + list(INDICES)
+SERIES = {**{a: f"KX{a}15M" for a in CRYPTO}, **{k: v["series"] for k, v in INDICES.items()}}
+LABELS = {**{a: a for a in CRYPTO}, **{k: v["label"] for k, v in INDICES.items()}}
+INDEX_HISTORY_DAYS = 29  # Yahoo keeps about 30 days of 1-minute index data
+
+
+def is_index(asset):
+    return asset in INDICES
+
+
+def decision_delay(cfg, asset):
+    """Minutes before close when a decision is made for this asset."""
+    return cfg["index_time_delay"] if is_index(asset) else cfg["time_delay"]
 
 MODELS = {
     "haiku": "Haiku 4.5 (lightest on usage limits)",
@@ -33,7 +50,8 @@ DEFAULTS = {
     "effort": "medium",
     "strategy": "claude",
     "assets": ["BTC"],
-    "time_delay": 10,            # minutes left in the session when the decision is made
+    "time_delay": 10,            # minutes left in a 15-minute crypto session when the decision is made
+    "index_time_delay": 15,      # minutes left in an hourly stock-index market when the decision is made
     "obey_model": True,          # False trades the opposite of the model's call
     "bankroll": 1000.0,
     "sizing": "percent",
@@ -78,7 +96,7 @@ def validate(cfg):
         raise ValueError(f"strategy must be one of {list(STRATEGIES)}")
     if out["sizing"] not in SIZING:
         raise ValueError(f"sizing must be one of {list(SIZING)}")
-    for key in ("time_delay", "bankroll", "fixed_stake", "percent_stake", "kelly_fraction",
+    for key in ("time_delay", "index_time_delay", "bankroll", "fixed_stake", "percent_stake", "kelly_fraction",
                 "max_stake_pct", "min_edge", "max_price", "slippage", "max_daily_profit",
                 "max_daily_loss", "parallel_calls"):
         try:
@@ -90,6 +108,8 @@ def validate(cfg):
         out[key] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
     if not 0.5 <= out["time_delay"] <= 15:
         raise ValueError("time_delay must be between 0.5 and 15 minutes")
+    if not 1 <= out["index_time_delay"] <= 55:
+        raise ValueError("index_time_delay must be between 1 and 55 minutes")
     if out["bankroll"] <= 0:
         raise ValueError("bankroll must be positive")
     if not 0 < out["max_price"] < 1:

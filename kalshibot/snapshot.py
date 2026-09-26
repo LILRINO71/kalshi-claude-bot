@@ -2,6 +2,8 @@
 import math
 from dataclasses import dataclass, field
 
+from .config import LABELS, is_index
+
 
 @dataclass
 class Snapshot:
@@ -36,10 +38,12 @@ class Snapshot:
 
 def build(asset, ticker, close_ts, decision_ts, strike, q, candles):
     """Return a Snapshot, or None if the data is too thin to decide on."""
-    if strike is None or not q or q.get("up_ask") is None or len(candles) < 30:
+    # Stock indices only trade 9:30-4:00, so the first hour has a short history.
+    min_candles = 10 if is_index(asset) else 30
+    if strike is None or not q or q.get("up_ask") is None or len(candles) < min_candles:
         return None
     closes = [c[4] for c in candles]
-    open_ts = close_ts - 15 * 60
+    open_ts = close_ts - (60 if is_index(asset) else 15) * 60
     session = [c[4] for c in candles if c[0] >= open_ts]
     snap = Snapshot(asset=asset, ticker=ticker, close_ts=close_ts, decision_ts=decision_ts,
                     strike=strike, closes=closes, session_closes=session, **q)
@@ -72,6 +76,8 @@ def compute_features(s):
 
 def prompt(s, instructions):
     """The decision prompt. No dates or tickers, so a backtest can't lean on remembered prices."""
+    if is_index(s.asset):
+        return index_prompt(s, instructions)
     f = s.features
 
     def n(x, d=3):
@@ -89,6 +95,40 @@ DOWN ask {n(s.down_ask, 2)}  bid {n(s.down_bid, 2)}
 
 {s.asset}-USD SPOT
 Price {s.spot:g} ({n(f['dist_pct'])}% vs strike, {n(f['z'], 2)} sigma to close)
+Change: 1m {n(f['change_1m'])}% | 5m {n(f['change_5m'])}% | 15m {n(f['change_15m'])}% | 60m {n(f['change_60m'])}%
+1-minute volatility {n(f['vol_1m'], 4)}%
+Last 15 one-minute closes, oldest first: {closes}
+Random-walk baseline P(UP): {n(f['baseline_up'])}
+
+RULES
+- Buying UP costs the UP ask, buying DOWN costs the DOWN ask; fees add about 1-2 cents per contract near 50c.
+- Pick UP or DOWN only if your probability for that side beats its ask by a clear margin after fees; otherwise SKIP.
+- The market price is a strong prior set by fast traders; you need a concrete reason to disagree with it.
+- probability_up is your honest estimate that the market resolves UP, even when you SKIP.
+
+STRATEGY NOTES
+{instructions.strip() or '(none)'}"""
+
+
+def index_prompt(s, instructions):
+    f = s.features
+    name = LABELS[s.asset]
+
+    def n(x, d=3):
+        return "n/a" if x is None else f"{x:.{d}f}"
+
+    closes = ", ".join(f"{c:.2f}" for c in s.closes[-15:])
+    return f"""Kalshi hourly {name} market (one strike from a ladder of strikes for this hour).
+Question: will the {name} index be above {s.strike:g} at the top of the hour when this market closes?
+Strike: {s.strike:g} (a fixed level, chosen as the strike nearest the index at decision time)
+Minutes until close: {s.mins_left:.1f}
+
+KALSHI PRICES (a contract pays $1 if right; price = implied probability)
+UP   ask {n(s.up_ask, 2)}  bid {n(s.up_bid, 2)}
+DOWN ask {n(s.down_ask, 2)}  bid {n(s.down_bid, 2)}
+
+{name} INDEX
+Level {s.spot:.2f} ({n(f['dist_pct'])}% vs strike, {n(f['z'], 2)} sigma to close)
 Change: 1m {n(f['change_1m'])}% | 5m {n(f['change_5m'])}% | 15m {n(f['change_15m'])}% | 60m {n(f['change_60m'])}%
 1-minute volatility {n(f['vol_1m'], 4)}%
 Last 15 one-minute closes, oldest first: {closes}

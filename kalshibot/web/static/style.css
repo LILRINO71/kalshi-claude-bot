@@ -142,6 +142,8 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
   appearance: none; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
   border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 12.5px; cursor: pointer;
 }
+.chip-sep { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .06em; align-self: center; margin: 0 2px 0 6px; }
+.chip-sep:first-child { margin-left: 0; }
 .chip.on { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, var(--surface-2)); }
 
 .btn {
