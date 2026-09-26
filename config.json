@@ -1,0 +1,12 @@
+{
+  "assets": ["BTC"],
+  "order_size": 100,
+  "time_delay": 10,
+  "obey_model": true,
+  "max_daily_profit": 400,
+  "max_daily_loss": -200,
+  "model": "sonnet",
+  "simulate_fees": true,
+  "walk_order_book": true,
+  "poll_seconds": 3
+}
