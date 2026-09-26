@@ -33,7 +33,8 @@ pip install requests
 ```
 
 Log the Claude Code CLI into your Claude account once. The Claude desktop app ships the CLI at
-`%APPDATA%\Claude\claude-code\<version>\claude.exe`, and the bot finds it automatically. Run it, type `/login`, and pick
+`%APPDATA%\Claude\claude-code\<version>\claude.exe` (Microsoft Store installs:
+`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude-code\<version>\claude.exe`), and the bot finds it automatically. Run it, type `/login`, and pick
 your Claude subscription (not an API key). If you use a different copy, set `CLAUDE_BIN` to its path.
 
 ## Use

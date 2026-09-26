@@ -281,7 +281,11 @@ def find_claude():
         return path
     # Claude desktop app bundles the CLI here on Windows.
     appdata = os.environ.get("APPDATA", "")
+    local = os.environ.get("LOCALAPPDATA", "")
     found = glob.glob(os.path.join(appdata, "Claude", "claude-code", "*", "claude.exe"))
+    # Microsoft Store installs keep their AppData inside the package folder.
+    found += glob.glob(os.path.join(local, "Packages", "Claude_*", "LocalCache", "Roaming",
+                                    "Claude", "claude-code", "*", "claude.exe"))
     if found:
         def version_key(p):
             parts = Path(p).parent.name.split(".")
