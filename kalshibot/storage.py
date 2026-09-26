@@ -25,10 +25,16 @@ def read_json(path, default=None):
     path = Path(path)
     if not path.exists():
         return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return default
+    for attempt in range(10):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            time.sleep(0.03)  # another process is mid-swap on Windows
+        except FileNotFoundError:
+            return default
+        except (json.JSONDecodeError, OSError):
+            return default
+    return default
 
 
 def write_json(path, obj):

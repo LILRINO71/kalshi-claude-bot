@@ -198,9 +198,11 @@ $("#bt-cancel").addEventListener("click", async () => {
   if (watchRun.id) await api(`/api/backtests/${watchRun.id}/cancel`, { method: "POST" });
 });
 
+// Free strategies may run while a Claude run is going, so the Run button stays enabled;
+// the server refuses a second Claude run with a clear message.
 function watchRun(id) {
   watchRun.id = id;
-  $("#bt-run").disabled = true;
+  let misses = 0;
   $("#bt-cancel").classList.remove("hidden");
   $("#bt-progress").classList.remove("hidden");
   clearInterval(pollTimer);
@@ -214,11 +216,13 @@ function watchRun(id) {
         const span = phase === "loading" ? 0.35 : phase === "deciding" ? 0.6 : 0.05;
         $("#bt-progress-fill").style.width = ((base + frac * span) * 100).toFixed(1) + "%";
         const calls = r.calls ? ` · ${r.calls.made} new calls, ${r.calls.cached} cached${r.calls.errors ? `, ${r.calls.errors} errors` : ""}` : "";
-        $("#bt-progress-text").textContent = (r.message || phase) + calls;
+        const name = r.params?.name ? `${r.params.name}: ` : "";
+        $("#bt-progress-text").textContent = name + (r.message || phase) + calls;
+        misses = 0;
         return;
       }
       clearInterval(pollTimer);
-      $("#bt-run").disabled = false;
+      watchRun.id = null;
       $("#bt-cancel").classList.add("hidden");
       $("#bt-progress-fill").style.width = "100%";
       $("#bt-progress-text").textContent = r.message || phase;
@@ -226,7 +230,16 @@ function watchRun(id) {
       await loadRuns();
       if (r.summary) openRun(id);
       else toast(r.message || "Backtest failed");
-    } catch (e) { $("#bt-progress-text").textContent = e.message; }
+    } catch (e) {
+      // A run swaps its progress file for its results file at the end; ride out brief gaps.
+      if (++misses >= 8) {
+        clearInterval(pollTimer);
+        watchRun.id = null;
+        $("#bt-cancel").classList.add("hidden");
+        $("#bt-progress-text").textContent = "Lost track of this run: " + e.message;
+        loadRuns();
+      }
+    }
   };
   tick();
   pollTimer = setInterval(tick, 1000);
