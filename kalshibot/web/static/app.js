@@ -71,6 +71,8 @@ async function init() {
   ["#bt-start", "#bt-end", "#bt-count", "#bt-sample", "#bt-seed", "#bt-delay", "#bt-idx-delay"].forEach((s) => $(s).addEventListener("input", estimateSoon));
   let tab = "backtest";
   try { tab = localStorage.getItem("tab") || tab; } catch (e) {}
+  const linked = location.hash.slice(1);  // e.g. /#daytrader opens that tab
+  if (linked && $("#tab-" + linked)) tab = linked;
   showTab(tab);
   loadRuns();
   estimateSoon();

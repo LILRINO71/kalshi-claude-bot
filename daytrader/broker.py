@@ -33,6 +33,7 @@ class Broker:
         self.last_price = {}    # ticker -> last close seen
         self.blocked = ""       # reason new entries are refused (daily loss stop)
         self.pending_exits = {}  # ticker -> earliest ts for a market exit
+        self.scheduled = []     # (ts, ticker, action, kwargs): check-in changes waiting for the answer time
         self.day_start_ts = day_start_ts
 
     # ------------------------------------------------------------ accounting
@@ -143,6 +144,23 @@ class Broker:
                      + (f", target {p['target']:.2f}" if p["target"] else ""))
         return None
 
+    def schedule(self, ts, ticker, action, **kw):
+        """Apply a stop/target change or a cancel from the first bar that starts at or after ts."""
+        self.scheduled.append((ts, ticker, action, kw))
+
+    def _run_scheduled(self, tk, t):
+        due = [s for s in self.scheduled if s[1] == tk and s[0] <= t]
+        if not due:
+            return
+        self.scheduled = [s for s in self.scheduled if s not in due]
+        for ts, _, action, kw in due:
+            if action == "cancel":
+                self.cancel(tk, t, kw.get("why", "check-in"))
+            elif action == "adjust":
+                err = self.modify(tk, t, **kw)
+                if err:
+                    self.log(t, f"{tk} adjust ignored: {err}", "warn")
+
     def exit_at_next_bar(self, ticker, ts):
         if ticker in self.positions:
             self.pending_exits[ticker] = ts
@@ -222,7 +240,8 @@ class Broker:
     def on_bar(self, tk, bar):
         """Process one finished bar for one ticker."""
         t, o, h, l, c = bar[:5]
-        cfg = self.cfg
+        # 0. Check-in changes whose answer had arrived by the start of this bar.
+        self._run_scheduled(tk, t)
         # 1. Market exits requested earlier (check-in said "exit now").
         if tk in self.positions and tk in self.pending_exits and self.pending_exits[tk] <= t:
             p = self.positions[tk]
@@ -317,8 +336,8 @@ class Broker:
             for od in self.working():
                 od["status"], od["reason"] = "cancelled", self.blocked
             for tk in list(self.positions):
-                self.pending_exits[tk] = t
-            self.log(t, f"Daily loss limit hit: no new entries, flattening", "warn")
+                self.pending_exits[tk] = t + 1  # every ticker exits on its next bar, never on one already started
+            self.log(t, "Daily loss limit hit: no new entries, flattening", "warn")
 
     def flatten(self, ts, prices, reason="close"):
         """Exit everything at the given prices (used at the end of the session)."""

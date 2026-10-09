@@ -86,9 +86,30 @@ def validate(cfg):
     if not 0 < out["max_leverage"] <= 4:
         raise ValueError("max_leverage must be in (0, 4]")
     out["universe"] = [str(t).upper() for t in (out["universe"] or [])]
-    out["checkins"] = sorted(str(t) for t in (out["checkins"] or []))
+    times = {}
+    for k in ("premarket_time", "flatten_time"):
+        times[k] = _hhmm(out[k], k)
+    out.update(times)
+    checkins = sorted({_hhmm(t, "checkins") for t in (out["checkins"] or [])})
+    if any(not "09:30" < t < out["flatten_time"] for t in checkins):
+        raise ValueError(f"check-ins must be between 09:30 and the flatten time {out['flatten_time']}")
+    if not "04:00" <= out["premarket_time"] <= "09:25" or not "09:45" <= out["flatten_time"] <= "15:59":
+        raise ValueError("premarket_time must be 04:00-09:25 and flatten_time 09:45-15:59")
+    out["checkins"] = checkins
     out["instructions"] = str(out["instructions"] or "")[:4000]
     return out
+
+
+def _hhmm(value, key):
+    """'9:45' -> '09:45'; zero-padded times sort correctly as text."""
+    try:
+        h, m = str(value).strip().split(":")
+        h, m = int(h), int(m)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError
+    except ValueError:
+        raise ValueError(f"{key} must be HH:MM times, got {value!r}")
+    return f"{h:02d}:{m:02d}"
 
 
 def save(cfg):

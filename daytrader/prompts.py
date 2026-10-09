@@ -125,7 +125,7 @@ CURATE_SCHEMA = {
     "type": "object",
     "properties": {
         "operations": {"type": "array", "maxItems": 10, "items": {"type": "object", "properties": {
-            "op": {"type": "string", "enum": ["add", "edit", "merge", "retire"]},
+            "op": {"type": "string", "enum": ["add", "edit", "merge", "retire", "revive"]},
             "rule_ids": {"type": "array", "items": {"type": "string"},
                          "description": "edit/retire: the one rule; merge: the rules being merged; add: empty"},
             "text": {"type": "string", "description": "the rule text for add, edit and merge"},
@@ -443,5 +443,6 @@ Maintain the playbook with a few small operations; do not rewrite it wholesale. 
 - merge: rules that say the same thing become one (rule_ids = the rules merged, text = the combined rule);
 - edit: sharpen a vague rule into "when <observable condition>, <action>" without changing what it means;
 - retire: a rule the evidence contradicts or that never applies (rules with 3+ trades and positive R stay);
-- add: a rule the recent sessions clearly support, written as "when <condition>, <action>".
+- add: a rule the recent sessions clearly support, written as "when <condition>, <action>";
+- revive: bring a dormant rule back into the playbook when recent sessions show it applies again.
 The playbook may hold at most {cfg['max_rules']} live rules. Return no operations if the playbook is in good shape."""

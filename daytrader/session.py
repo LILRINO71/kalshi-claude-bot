@@ -57,6 +57,7 @@ class DaySession:
         self.scan, self.focus, self.plans, self.checkins, self.notes = [], [], [], [], []
         self.brief, self.reflection = None, None
         self.processed = {}
+        self._recorded = False
         self.calls = {"made": 0, "cached": 0, "errors": 0, "latency_s": 0.0}
         self.market_news, self.ticker_news, self.fps, self.market_fp = [], {}, {}, []
         close = data.session_close(day)
@@ -168,7 +169,8 @@ class DaySession:
                "playbook": self.memory.playbook_text(), "cfg": self.cfg}
         answer, latency = self._ask("research", self.brain.research, ctx, now)
         if answer:
-            self._place_plans(answer.get("plans") or [], max(now + latency, clock.at(self.day, "09:30")), "premarket")
+            self._place_plans(answer.get("plans") or [], max(now + latency, clock.at(self.day, "09:30")), "premarket",
+                              decided_at=now)
             self.brief["watch_only"] = answer.get("watch_only") or []
         return True
 
@@ -183,7 +185,9 @@ class DaySession:
         d = self._daily(view, tk)
         return d["prev_close"] if d else None
 
-    def _place_plans(self, plans, active_from, origin):
+    def _place_plans(self, plans, active_from, origin, decided_at=None):
+        """Turn plans into broker orders. Prices are checked against the price Claude saw when it decided;
+        what the market did after that (a gap at the open, say) is the broker's job."""
         for i, p in enumerate(plans):
             tk = str(p.get("ticker", "")).upper()
             plan = {**p, "ticker": tk, "id": f"{self.day}-{origin}-{len(self.plans) + 1}", "origin": origin,
@@ -192,15 +196,15 @@ class DaySession:
             if tk not in self.universe:
                 plan["status"] = "rejected: not in universe"
                 continue
-            ref = self._ref_price(tk, active_from)
+            ref = self._ref_price(tk, decided_at or active_from)
             err = self._sanity(plan, ref)
             if err:
                 plan["status"] = f"rejected: {err}"
                 self.log(f"{tk} plan rejected: {err}", "warn", active_from)
                 continue
-            start = max(active_from, clock.at(self.day, p.get("valid_from") or "09:35")) if origin == "premarket" \
-                else active_from
-            order = {"ticker": tk, "side": p.get("side"), "kind": p.get("entry_type") or "stop",
+            start = max(active_from, self._t(p.get("valid_from"), clock.at(self.day, "09:35"))) \
+                if origin == "premarket" else active_from
+            order = {"ticker": tk, "side": p.get("side"), "kind": p.get("entry_type"),
                      "price": p.get("entry"), "stop": p.get("stop"), "target": p.get("target"),
                      "active_from": start, "expires": self._t(p.get("valid_until"), self.flatten_ts),
                      "time_exit": self._t(p.get("time_exit"), None), "breakeven_at": p.get("breakeven_at"),
@@ -224,6 +228,8 @@ class DaySession:
         side, stop, entry = p.get("side"), p.get("stop"), p.get("entry")
         if side not in ("long", "short"):
             return "side must be long or short"
+        if p.get("entry_type") not in ("stop", "limit", "market"):
+            return "entry_type must be stop, limit or market"
         if not isinstance(stop, (int, float)) or stop <= 0:
             return "missing stop"
         if ref is None:
@@ -249,7 +255,7 @@ class DaySession:
             return f"stop distance {risk * 100:.2f}% is outside 0.1%-8%"
         return None
 
-    def _apply_actions(self, actions, at_ts):
+    def _apply_actions(self, actions, at_ts, decided_at=None):
         b = self.broker
         new_plans = []
         for a in actions:
@@ -259,10 +265,11 @@ class DaySession:
             if act == "exit_now":
                 err = b.exit_at_next_bar(tk, at_ts)
             elif act == "cancel":
-                b.cancel(tk, at_ts, a.get("why", "check-in"))
+                b.schedule(at_ts, tk, "cancel", why=a.get("why", "check-in"))
             elif act == "adjust":
-                err = b.modify(tk, at_ts, stop=a.get("stop"), target=a.get("target"),
-                               time_exit=self._t(a.get("time_exit"), None))
+                # Like every other action, it only takes effect once the answer exists.
+                b.schedule(at_ts, tk, "adjust", stop=a.get("stop"), target=a.get("target"),
+                           time_exit=self._t(a.get("time_exit"), None))
             elif act == "new_entry":
                 new_plans.append(a)
             elif act not in ("hold", None):
@@ -270,7 +277,7 @@ class DaySession:
             if err:
                 self.log(f"{tk} {act} ignored: {err}", "warn", at_ts)
         if new_plans:
-            self._place_plans(new_plans, at_ts, "checkin")
+            self._place_plans(new_plans, at_ts, "checkin", decided_at)
 
     # ------------------------------------------------------------ intraday
 
@@ -323,7 +330,7 @@ class DaySession:
         self.checkins.append(row)
         if answer:
             self.log(f"Check-in: {str(answer.get('market_read', ''))[:160]}", "checkin", now)
-            self._apply_actions(answer.get("actions") or [], now + int(latency) + 1)
+            self._apply_actions(answer.get("actions") or [], now + int(latency) + 1, now)
 
     def close(self):
         self.advance_to(self.flatten_ts)
@@ -340,8 +347,10 @@ class DaySession:
     def reflect(self, now, learn=True):
         view = self.data.view(now)
         b = self.broker
-        for t in b.trades:
-            self.memory.record_trade(t)
+        if not self._recorded:  # once per day, even if reflect is retried after a failed model call
+            self._recorded = True
+            for t in b.trades:
+                self.memory.record_trade(t)
         day_moves = []
         for r in self.scan[:12]:
             tk = r["ticker"]
@@ -409,7 +418,7 @@ class DaySession:
         ans, _ = self._ask("curation", self.brain.curate, ctx, now)
         if not ans:
             return []
-        changes, budget = [], {"add": 3, "edit": 3, "merge": 3, "retire": 3}
+        changes, budget = [], {"add": 3, "edit": 3, "merge": 3, "retire": 3, "revive": 3}
         for op in ans.get("operations") or []:
             kind, ids = op.get("op"), [str(i) for i in op.get("rule_ids") or []]
             if kind not in budget or budget[kind] <= 0:
@@ -423,6 +432,8 @@ class DaySession:
             elif kind == "merge":
                 r = m.merge_rules(ids, op.get("text", ""), op.get("tags") or [], self.day, op.get("why", ""))
                 changes += [f"merged {'+'.join(ids)}->{r['id']}"] if r else []
+            elif kind == "revive" and ids and m.revive_rule(ids[0], self.day, op.get("why", "")):
+                changes.append(f"revived {ids[0]}")
             elif kind == "retire" and ids:
                 r = m.rule(ids[0])
                 proven = r and r["uses"] >= 3 and r["sum_r"] > 0

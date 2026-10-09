@@ -130,8 +130,11 @@ class Memory:
 
     def add_rule(self, text, tags=(), day="", source="reflection", status="trial"):
         text = " ".join(str(text).split())[:400]
-        if not text or any(r["text"].lower() == text.lower() for r in self.active_rules(True)):
+        if not text or any(r["text"].lower() == text.lower() for r in self.active_rules()):
             return None
+        dormant = next((r for r in self.rules if r["status"] == "dormant" and r["text"].lower() == text.lower()), None)
+        if dormant:  # the same idea again: wake the old rule up, with its evidence
+            return self.revive_rule(dormant["id"], day, "proposed again")
         if status == "trial" and sum(r["status"] == "trial" for r in self.rules) >= MAX_TRIAL:
             return None
         rid = f"R{self.state['next_rule']}"
@@ -165,9 +168,17 @@ class Memory:
         self._bump(day, {"op": "retire", "id": rid, "why": r["retired_why"]})
         return True
 
+    def revive_rule(self, rid, day, why=""):
+        r = self.rule(rid)
+        if not r or r["status"] != "dormant":
+            return None
+        r["status"], r["updated"], r["last_cited"] = "trial", day, self.day_index
+        self._bump(day, {"op": "revive", "id": rid, "why": str(why)[:300]})
+        return r
+
     def merge_rules(self, ids, text, tags, day, why=""):
         """Replace several rules with one; the new rule inherits their summed evidence."""
-        olds = [self.rule(i) for i in ids]
+        olds = [self.rule(i) for i in dict.fromkeys(ids)]
         olds = [r for r in olds if r and r["status"] != "retired"]
         if len(olds) < 2:
             return None
@@ -230,7 +241,8 @@ class Memory:
             elif n < 3 and r["harmful"] - r["helpful"] >= OPINION_RETIRE:
                 self.retire_rule(r["id"], day, f"untested and judged harmful {r['harmful']}x vs helpful {r['helpful']}x")
                 changes.append(f"retired {r['id']}")
-            elif r["status"] != "dormant" and self.day_index - r["last_cited"] >= DORMANT_DAYS and r["source"] != "seed":
+            elif (r["status"] != "dormant" and self.day_index - r["last_cited"] >= DORMANT_DAYS
+                  and r["source"] != "seed" and not (n >= 3 and r["sum_r"] > 0)):
                 r["status"] = "dormant"
                 self._bump(day, {"op": "dormant", "id": r["id"]})
                 changes.append(f"dormant {r['id']}")
@@ -293,7 +305,9 @@ class Memory:
         scored.sort(key=lambda x: -x[0])
         picked = [l for _, l in scored[:k]]
         for l in picked:
-            l["hits"] += 1
+            if l.get("last_hit") != self.day_index:  # hits count days a lesson was useful, not lookups
+                l["last_hit"] = self.day_index
+                l["hits"] += 1
         return picked
 
     def end_day(self):
@@ -301,7 +315,7 @@ class Memory:
         self.state["day_index"] += 1
         keep = []
         for l in self.lessons:
-            if l["layer"] == "short" and (l["hits"] >= 5 or l["importance"] >= PROMOTE_IMPORTANCE):
+            if l["layer"] == "short" and (l["hits"] >= 3 or l["importance"] >= PROMOTE_IMPORTANCE):
                 l["layer"] = "long"
             if l["layer"] == "short" and self.day_index - l["day_index"] > SHORT_MAX_AGE:
                 continue

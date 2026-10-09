@@ -21,6 +21,21 @@ def _run_dir(run_id):
     return store.RUNS / run_id
 
 
+def _salvage(s, day):
+    """Close out a day that crashed: flatten at the last prices and keep the books straight, no learning."""
+    try:
+        s.close()
+    except Exception:
+        s.broker.flatten(s.flatten_ts, {}, "error")
+    try:
+        return s.reflect(clock.at(day, "16:05"), learn=False)
+    except Exception:
+        b = s.broker
+        return {"day": day, "pnl": round(b.realized, 2), "trades": len(b.trades), "start_equity": b.start_equity,
+                "end_equity": round(b.start_equity + b.realized, 2), "focus": s.focus, "rule_changes": [],
+                "summary": "day ended by an error", "calls": s.calls}
+
+
 def plan_days(data, start, end):
     days = data.trading_days(start, end)
     return [d for d in days if d < clock.today_et() or clock.now_ts() > clock.at(d, "16:10")]
@@ -32,12 +47,6 @@ def run(cfg, start, end, name="", profile=None, save_profile=None, allow_leaky=F
     `on_start(run_id)` is called once the run has an id."""
     store.ensure_dirs()
     cfg = config.validate(cfg)
-    cutoff = config.cutoff_for(cfg)
-    if cfg["brain"] == "claude" and start <= cutoff and not allow_leaky:
-        raise ValueError(f"{cfg['model']}'s training data runs to about {cutoff}: it may already know what happened "
-                         f"on days before then. Start after {cutoff}, or pass --allow-leaky to run anyway (the "
-                         f"results will be flagged).")
-    data = MarketData(cfg["interval"], cfg)
     if resume:
         run_id = resume
         state = store.read_json(_run_dir(run_id) / "run.json", None, strict=True)
@@ -45,10 +54,21 @@ def run(cfg, start, end, name="", profile=None, save_profile=None, allow_leaky=F
             raise ValueError(f"no run {run_id}")
         cfg, start, end = state["config"], state["start"], state["end"]
     else:
+        cutoff = config.cutoff_for(cfg)
+        if cfg["brain"] == "claude" and start <= cutoff and not allow_leaky:
+            raise ValueError(f"{cfg['model']}'s training data runs to about {cutoff}: it may already know what "
+                             f"happened on days before then. Start after {cutoff}, or pass --allow-leaky to run anyway "
+                             f"(the results will be flagged).")
+        if profile:
+            learned = [j["day"] for j in store.read_jsonl(store.PROFILES / profile / "journal.jsonl")]
+            if learned and max(learned) >= start:
+                raise ValueError(f"profile '{profile}' has learned from days up to {max(learned)}; a backtest starting "
+                                 f"{start} would see lessons from its own future. Start after {max(learned)}.")
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         state = {"id": run_id, "name": name, "config": cfg, "start": start, "end": end, "status": "running",
                  "created": time.time(), "leaky": cfg["brain"] == "claude" and start <= cutoff, "cutoff": cutoff,
                  "profile": profile, "days": [], "trades": [], "equity_curve": [], "errors": []}
+    data = MarketData(cfg["interval"], cfg)
     folder = _run_dir(run_id)
     if on_start:
         on_start(run_id)
@@ -83,14 +103,22 @@ def run(cfg, start, end, name="", profile=None, save_profile=None, allow_leaky=F
             t0 = time.time()
             failures = dict(data.news_failures)
             s = DaySession(day, cfg, data, brain, memory, equity, log=log)
-            ok = s.premarket(clock.at(day, cfg["premarket_time"]))
-            if ok:
-                for hhmm in cfg["checkins"]:
-                    t = clock.at(day, hhmm)
-                    if t < s.flatten_ts:
-                        s.checkin(t)
-                s.close()
-            row = s.reflect(clock.at(day, "16:05"), learn=cfg["learn"])
+            try:
+                ok = s.premarket(clock.at(day, cfg["premarket_time"]))
+                if ok:
+                    for hhmm in cfg["checkins"]:
+                        t = clock.at(day, hhmm)
+                        if t < s.flatten_ts:
+                            s.checkin(t)
+                    s.close()
+                row = s.reflect(clock.at(day, "16:05"), learn=cfg["learn"])
+            except StopRun:
+                raise
+            except Exception as e:  # one bad day (odd data, a malformed answer) must not end the run
+                traceback.print_exc()
+                s.notes.append({"t": clock.at(day, "16:05"), "step": "day", "error": repr(e), "kind": "crash"})
+                log(f"{day}: finished early after an error: {e!r}")
+                row = _salvage(s, day)
             equity = row["end_equity"]
             failed = {h: n - failures.get(h, 0) for h, n in data.news_failures.items() if n > failures.get(h, 0)}
             if failed:
@@ -126,11 +154,15 @@ def run(cfg, start, end, name="", profile=None, save_profile=None, allow_leaky=F
         store.write_json(folder / "run.json", state)
         if save_profile:
             dest = store.PROFILES / save_profile
+            if (dest / "memory.json").exists() and save_profile != profile:
+                # Never overwrite what another run or live trading has learned.
+                dest = store.PROFILES / f"{save_profile}-{run_id}"
+                log(f"Profile '{save_profile}' already exists; saving to '{dest.name}' instead")
             dest.mkdir(parents=True, exist_ok=True)
             for f in mem_dir.iterdir():
                 if f.is_file():
                     shutil.copy2(f, dest / f.name)
-            log(f"Saved what this run learned to profile '{save_profile}'")
+            log(f"Saved what this run learned to profile '{dest.name}'")
         path = report.write(state, memory)
         log(f"Report: {path}")
     return state

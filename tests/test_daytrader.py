@@ -455,3 +455,105 @@ def test_features_and_fingerprint():
     assert "gapup2" in fp and "innews" in fp and "sector_technology" in fp
     st = features.intraday_stats(reg, d["prev_close"], d["avg_volume"], 300)
     assert st["or_high"] >= st["open"] and st["vwap"] > 0
+
+
+# ---------------------------------------------------------------- regressions from review
+
+def test_checkin_times_are_normalized_and_sorted_by_time():
+    c = cfg(checkins=["14:00", "9:45", "11:30"])
+    assert c["checkins"] == ["09:45", "11:30", "14:00"]
+    with pytest.raises(ValueError):
+        cfg(checkins=["9:45 AM"])
+    with pytest.raises(ValueError):
+        cfg(checkins=["16:30"])
+
+
+def test_checkin_adjustments_wait_for_the_answer():
+    b = broker()
+    b.submit({"ticker": "AAA", "side": "long", "kind": "stop", "price": 100.0, "stop": 98.0}, 0)
+    b.on_bar("AAA", bar("10:00", 100.0, 100.5, 99.9, 100.4))
+    b.schedule(clock.at(DAY, "10:08"), "AAA", "adjust", stop=99.8)  # answer arrives mid-bar
+    b.on_bar("AAA", bar("10:05", 100.4, 100.6, 99.7, 100.2))        # would hit 99.8 if applied early
+    assert "AAA" in b.positions
+    b.on_bar("AAA", bar("10:10", 100.2, 100.3, 99.6, 99.9))
+    assert b.trades[0]["exit_reason"] == "stop" and b.trades[0]["exit"] == pytest.approx(99.79)
+
+
+def test_daily_stop_exits_other_tickers_on_their_next_bar():
+    b = broker(max_daily_loss_pct=0.1, risk_per_trade_pct=1)
+    for tk in ("AAA", "BBB"):
+        b.submit({"ticker": tk, "side": "long", "kind": "market", "stop": 90.0}, 0)
+        b.on_bar(tk, bar("09:35", 100, 100, 100, 100))
+    b.on_bar("AAA", bar("09:40", 100, 100, 98.9, 99.0))   # triggers the stop
+    b.on_bar("BBB", bar("09:40", 100, 100, 97.0, 97.0))   # same bar time: already under way, keeps running
+    assert "BBB" in b.positions
+    b.on_bar("BBB", bar("09:45", 97.0, 97.1, 96.9, 97.0))
+    assert "BBB" not in b.positions and b.trades[-1]["exit"] == pytest.approx(96.99)
+
+
+def test_plans_need_an_entry_type_and_odd_times_do_not_crash():
+    from daytrader.session import DaySession
+    assert "entry_type" in DaySession._sanity({"side": "long", "entry": 101.0, "stop": 99.0}, 100.0)
+
+    class Sloppy(ScriptedBrain):
+        def research(self, ctx):
+            answer, meta = super().research(ctx)
+            answer["plans"][0]["valid_from"] = "9:35 AM"
+            return answer, meta
+    s, row, _ = run_day(Sloppy())
+    assert row["trades"] == 1
+
+
+def test_trades_are_credited_once_even_if_reflection_runs_twice():
+    brain = ScriptedBrain()
+    s, row, mem = run_day(brain)
+    s.reflect(clock.at(DAY, "16:06"), learn=False)
+    assert mem.rule("R1")["uses"] == 1
+
+
+def test_lesson_hits_count_days_not_lookups(tmp_path):
+    m = Memory(tmp_path / "mem", seed=False)
+    m.add_lesson("Gaps fade", DAY, ["gap"], [], 5)
+    for _ in range(6):
+        m.recall("gaps", k=3)
+    assert m.lessons[0]["hits"] == 1
+    m.end_day()
+    assert m.lessons[0]["layer"] == "short"
+
+
+def test_dormant_rules_come_back_and_proven_ones_stay(tmp_path):
+    from daytrader import memory as mem_mod
+    m = Memory(tmp_path / "mem", seed=False)
+    quiet = m.add_rule("When oil spikes, avoid airlines", [], DAY)
+    proven = m.add_rule("When a gap holds VWAP, buy it", [], DAY)
+    for _ in range(3):
+        m.record_trade({"rules": [proven["id"]], "r": 1.0, "pnl": 10})
+    m.state["day_index"] += mem_mod.DORMANT_DAYS + 1
+    m.evolve(DAY, 25)
+    assert quiet["status"] == "dormant" and proven["status"] != "dormant"
+    again = m.add_rule("When oil spikes, avoid airlines", [], DAY)
+    assert again["id"] == quiet["id"] and quiet["status"] == "trial"
+    a = m.add_rule("When X, do Y", [], DAY)
+    m.record_trade({"rules": [a["id"]], "r": 2.0, "pnl": 10})
+    assert m.merge_rules([a["id"], a["id"]], "When X, do Z", [], DAY) is None  # one rule is not a merge
+
+
+def test_backtest_refuses_a_profile_that_learned_from_later_days():
+    folder = store.PROFILES / "later"
+    folder.mkdir(parents=True)
+    store.append_jsonl(folder / "journal.jsonl", {"day": "2026-09-30"})
+    with pytest.raises(ValueError, match="its own future"):
+        backtest.run(cfg(brain="none"), "2026-09-01", "2026-09-05", profile="later")
+
+
+def test_sec_times_without_a_header_count_as_end_of_day(monkeypatch):
+    from daytrader import data as data_mod
+    md = data_mod.MarketData("5m")
+    monkeypatch.setattr(md, "_cik", lambda tk: 123)
+    monkeypatch.setattr(md, "_submissions", lambda cik, ts: {
+        "form": ["8-K"], "filingDate": [DAY], "acceptanceDateTime": [f"{DAY}T12:05:00.000Z"],
+        "accessionNumber": ["0000000000-26-000001"], "items": ["2.02"], "primaryDocDescription": ["8-K"]})
+    monkeypatch.setattr(md, "_sec_get", lambda url, as_json=True: None)  # header download fails
+    assert md.sec_filings("AAA", clock.at(DAY, "00:00"), clock.at(DAY, "14:00")) == []
+    late = md.sec_filings("AAA", clock.at(DAY, "00:00"), clock.at("2026-08-13", "09:00"))
+    assert late and late[0]["ts"] == clock.at(DAY, "23:59")

@@ -84,6 +84,10 @@ def run(cfg, profile="live", once=False, log=print):
             log(f"Stopped: {e}. Flattening.")
             s.close()
             row = s.reflect(clock.now_ts(), learn=False)
+        except Exception as e:  # keep the account consistent and carry on tomorrow
+            log(f"Error during the session: {e!r}. Flattening.")
+            s.close()
+            row = s.reflect(clock.now_ts(), learn=False)
         acct["equity"] = row["end_equity"]
         acct["days"].append({k: row[k] for k in ("day", "pnl", "trades", "start_equity", "end_equity", "focus",
                                                  "summary", "rule_changes")})

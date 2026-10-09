@@ -232,7 +232,9 @@ class MarketData:
     def session_close(self, day):
         if day in EARLY_CLOSES:
             return clock.at(day, "13:00")
-        bars = [b for b in self.intraday("SPY", day) if clock.at(day, "09:30") <= b[0] < clock.at(day, "16:00")]
+        # Yahoo's after-hours bars have no volume, so the regular session is the bars that traded volume.
+        bars = [b for b in self.intraday("SPY", day)
+                if clock.at(day, "09:30") <= b[0] < clock.at(day, "16:00") and b[5]]
         if not bars:
             return clock.at(day, "16:00")
         end = bars[-1][0] + self.interval_s
@@ -396,7 +398,7 @@ class MarketData:
         raw = self._sec_get(SEC_HEADER.format(cik=cik, folder=acc.replace("-", ""), acc=acc), as_json=False)
         m = re.search(rb"<ACCEPTANCE-DATETIME>(\d{14})", raw or b"")
         if not m:
-            return fallback  # the index time is never earlier than the real one, so it is a safe stand-in
+            return fallback
         t = m.group(1).decode()
         ts = clock.at(f"{t[:4]}-{t[4:6]}-{t[6:8]}", f"{t[8:10]}:{t[10:12]}") + int(t[12:14])
         self._acc[acc] = ts
@@ -417,11 +419,9 @@ class MarketData:
             day = sub["filingDate"][i]
             if not first <= day <= last or not _sec_relevant(form):
                 continue
-            try:
-                fallback = int(datetime.fromisoformat(sub["acceptanceDateTime"][i].replace("Z", "+00:00")).timestamp())
-            except (ValueError, IndexError):
-                fallback = clock.at(day, "23:59")
-            ts = self._accepted(cik, sub["accessionNumber"][i], fallback)
+            # Without the header's exact time, assume the latest it could be: the end of its filing date.
+            # (The index's own time can't be trusted: its time zone label is wrong on many filings.)
+            ts = self._accepted(cik, sub["accessionNumber"][i], clock.at(day, "23:59"))
             if start_ts <= ts <= end_ts:
                 out.append({"ts": ts, "known_ts": ts, "coarse": False, "source": "SEC EDGAR", "url": "",
                             "title": _sec_title(form, sub["items"][i], sub["primaryDocDescription"][i])})
@@ -542,8 +542,11 @@ class LiveData(MarketData):
         hit = self._fresh.get(key)
         if hit and time.time() - hit[0] < self.TTL["bars"]:
             return hit[1]
+        fetched = time.time()
         js = _get(YAHOO.format(tk), {"interval": self.interval, "range": "1d", "includePrePost": "true"}, "yahoo")
-        rows = [b for b in (_parse_chart(js) or []) if clock.day_of(b[0]) == day]
+        # Only bars that had finished when this fetch was made: a reused fetch must not pass off a
+        # half-built bar as finished.
+        rows = [b for b in (_parse_chart(js) or []) if clock.day_of(b[0]) == day and b[0] + self.interval_s <= fetched]
         if not rows and hit:
             rows = hit[1]
         self._fresh[key] = (time.time(), rows)
