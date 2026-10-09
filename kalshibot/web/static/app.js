@@ -539,10 +539,11 @@ async function loadDaytrader() {
   try {
     const [r, L] = await Promise.all([api("/api/daytrader/runs"), api("/api/daytrader/live")]);
     if (!$("#dt-start").value) {
+      const ymd = (d) => d.toLocaleDateString("en-CA");  // local YYYY-MM-DD
       const d = new Date();
       d.setDate(d.getDate() - 56);  // Yahoo keeps about 60 days of 5-minute bars
-      $("#dt-start").value = d.toISOString().slice(0, 10);
-      $("#dt-end").value = new Date().toISOString().slice(0, 10);
+      $("#dt-start").value = ymd(d);
+      $("#dt-end").value = ymd(new Date());
     }
     const job = r.job;
     $("#dt-run").disabled = job.running;
