@@ -12,9 +12,15 @@ class ClaudeBrain:
         self.model, self.effort, self.source = cfg["model"], cfg["effort"], source
 
     def _call(self, step, prompt, schema):
-        answer, meta = llm.ask(prompt, schema, system=prompts.SYSTEM, model=self.model, effort=self.effort,
-                               source=f"daytrader-{self.source}-{step}")
-        return answer, {**meta, "llm": True}
+        for attempt in (1, 2):
+            try:
+                answer, meta = llm.ask(prompt, schema, system=prompts.SYSTEM, model=self.model, effort=self.effort,
+                                       source=f"daytrader-{self.source}-{step}")
+                return answer, {**meta, "llm": True}
+            except llm.LLMError as e:
+                # A malformed or failed answer is often fine the second time; limits, login and timeouts are not.
+                if attempt == 2 or e.fatal or e.kind == "timeout":
+                    raise
 
     def morning(self, ctx):
         return self._call("morning", prompts.morning(ctx), prompts.MORNING_SCHEMA)

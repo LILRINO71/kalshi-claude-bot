@@ -208,7 +208,7 @@ class DaySession:
                      "price": p.get("entry"), "stop": p.get("stop"), "target": p.get("target"),
                      "active_from": start, "expires": self._t(p.get("valid_until"), self.flatten_ts),
                      "time_exit": self._t(p.get("time_exit"), None), "breakeven_at": p.get("breakeven_at"),
-                     "size": p.get("size", 1.0), "plan_id": plan["id"], "rules": p.get("rules_used") or [],
+                     "size": p.get("size", 1.0), "plan_id": plan["id"], "rules": (p.get("rules_used") or [])[:3],
                      "setup": p.get("setup", ""), "confidence": p.get("confidence")}
             o, err = self.broker.submit(order, active_from)
             plan["status"] = f"rejected: {err}" if err else "working"

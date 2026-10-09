@@ -557,3 +557,20 @@ def test_sec_times_without_a_header_count_as_end_of_day(monkeypatch):
     assert md.sec_filings("AAA", clock.at(DAY, "00:00"), clock.at(DAY, "14:00")) == []
     late = md.sec_filings("AAA", clock.at(DAY, "00:00"), clock.at("2026-08-13", "09:00"))
     assert late and late[0]["ts"] == clock.at(DAY, "23:59")
+
+
+def test_claude_steps_retry_once_after_a_bad_answer(monkeypatch):
+    from daytrader import brains
+    calls = []
+
+    def flaky(prompt, schema, **kw):
+        calls.append(kw["source"])
+        if len(calls) == 1:
+            raise llm.LLMError("structured_output_retry_exhausted", "error")
+        return {"summary": "ok"}, {"latency_s": 1, "cached": False, "tokens": 0}
+    monkeypatch.setattr(llm, "ask", flaky)
+    brain = brains.ClaudeBrain(cfg())
+    assert brain._call("reflect", "p", {})[0] == {"summary": "ok"} and len(calls) == 2
+    monkeypatch.setattr(llm, "ask", lambda *a, **k: (_ for _ in ()).throw(llm.LLMError("limit", "limit")))
+    with pytest.raises(llm.LLMError):
+        brain._call("reflect", "p", {})

@@ -22,10 +22,12 @@ SYSTEM = (
     "only the structured answer."
 )
 
+# Limits (list sizes, ranges) are stated in descriptions and enforced in code: hard schema limits make the
+# CLI's structured output fail outright ("structured_output_retry_exhausted") when an answer is slightly over.
 _STR = {"type": "string"}
 _NUM = {"type": "number"}
 _IDS = {"type": "array", "items": {"type": "string"}}
-_TAGS = {"type": "array", "items": {"type": "string"}, "maxItems": 6}
+_TAGS = {"type": "array", "items": {"type": "string"}, "description": "up to 6 short tags"}
 
 PLAN = {
     "type": "object",
@@ -40,14 +42,14 @@ PLAN = {
         "valid_until": {"type": "string", "description": "HH:MM; an unfilled order is cancelled then"},
         "time_exit": {"type": "string", "description": "HH:MM to exit regardless, or empty"},
         "breakeven_at": {"type": "number", "description": "move the stop to the entry once price reaches this, 0 for never"},
-        "size": {"type": "number", "minimum": 0.25, "maximum": 1, "description": "fraction of standard risk"},
+        "size": {"type": "number", "description": "0.25-1.0: fraction of the standard risk"},
         "setup": {"type": "string", "description": "short name of the setup, e.g. 'pre-market high breakout'"},
         "bull_case": {"type": "string", "description": "the strongest argument for the trade"},
         "bear_case": {"type": "string", "description": "the strongest argument against it"},
         "thesis": {"type": "string", "description": "your verdict after weighing both cases"},
         "invalidation": _STR,
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "rules_used": {"type": "array", "items": {"type": "string"}, "maxItems": 3,
+        "confidence": {"type": "number", "description": "0-1"},
+        "rules_used": {"type": "array", "items": {"type": "string"},
                        "description": "1-3 playbook rule ids this plan relies on, the most important first"},
     },
     "required": ["ticker", "side", "entry_type", "entry", "stop", "target", "valid_from", "valid_until", "size",
@@ -103,18 +105,18 @@ REFLECT_SCHEMA = {
             "verdict": {"type": "string", "enum": ["thesis_right", "thesis_wrong", "execution", "noise"]},
             "evidence": {"type": "string", "description": "the facts from today's data that support the verdict"}},
             "required": ["ticker", "verdict", "evidence"]}},
-        "lessons": {"type": "array", "maxItems": 5, "items": {"type": "object", "properties": {
+        "lessons": {"type": "array", "description": "1-5 lessons", "items": {"type": "object", "properties": {
             "text": _STR, "tags": _TAGS, "tickers": _IDS,
-            "importance": {"type": "integer", "minimum": 1, "maximum": 10}},
+            "importance": {"type": "number", "description": "1-10"}},
             "required": ["text", "tags", "tickers", "importance"]}},
         "rule_feedback": {"type": "array", "items": {"type": "object", "properties": {
             "rule_id": _STR, "verdict": {"type": "string", "enum": ["helpful", "harmful", "neutral"]}, "why": _STR},
             "required": ["rule_id", "verdict", "why"]}},
-        "new_rules": {"type": "array", "maxItems": 3, "items": {"type": "object", "properties": {
+        "new_rules": {"type": "array", "description": "at most 3", "items": {"type": "object", "properties": {
             "text": _STR, "tags": _TAGS, "why": _STR}, "required": ["text", "tags", "why"]}},
-        "edit_rules": {"type": "array", "maxItems": 3, "items": {"type": "object", "properties": {
+        "edit_rules": {"type": "array", "description": "at most 3", "items": {"type": "object", "properties": {
             "rule_id": _STR, "text": _STR, "why": _STR}, "required": ["rule_id", "text", "why"]}},
-        "retire_rules": {"type": "array", "maxItems": 3, "items": {"type": "object", "properties": {
+        "retire_rules": {"type": "array", "description": "at most 3", "items": {"type": "object", "properties": {
             "rule_id": _STR, "why": _STR}, "required": ["rule_id", "why"]}},
     },
     "required": ["summary", "process_review", "missed", "trade_verdicts", "lessons", "rule_feedback", "new_rules",
@@ -124,7 +126,7 @@ REFLECT_SCHEMA = {
 CURATE_SCHEMA = {
     "type": "object",
     "properties": {
-        "operations": {"type": "array", "maxItems": 10, "items": {"type": "object", "properties": {
+        "operations": {"type": "array", "description": "at most 10", "items": {"type": "object", "properties": {
             "op": {"type": "string", "enum": ["add", "edit", "merge", "retire", "revive"]},
             "rule_ids": {"type": "array", "items": {"type": "string"},
                          "description": "edit/retire: the one rule; merge: the rules being merged; add: empty"},
