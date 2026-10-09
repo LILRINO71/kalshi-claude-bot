@@ -43,6 +43,7 @@ function showTab(name) {
   try { localStorage.setItem("tab", name); } catch (e) {}
   if (name === "usage") loadUsage();
   if (name === "live") loadLive();
+  if (name === "daytrader") loadDaytrader();
 }
 
 // ------------------------------------------------------------------ settings + top bar
@@ -527,5 +528,73 @@ async function loadUsage() {
       <td>${r.ok ? "ok" : `<span class="neg">${esc(r.error_kind || "error")}</span> <span class="muted small">${esc((r.error || "").slice(0, 80))}</span>`}</td></tr>`).join("")
       || `<tr><td colspan="8" class="empty">No calls yet</td></tr>`) + "</tbody>";
 }
+
+// ------------------------------------------------------------------ day trader
+
+let dtTimer = null;
+async function loadDaytrader() {
+  clearTimeout(dtTimer);
+  try {
+    const [r, L] = await Promise.all([api("/api/daytrader/runs"), api("/api/daytrader/live")]);
+    if (!$("#dt-start").value) {
+      const d = new Date();
+      d.setDate(d.getDate() - 56);  // Yahoo keeps about 60 days of 5-minute bars
+      $("#dt-start").value = d.toISOString().slice(0, 10);
+      $("#dt-end").value = new Date().toISOString().slice(0, 10);
+    }
+    const job = r.job;
+    $("#dt-run").disabled = job.running;
+    $("#dt-stop").classList.toggle("hidden", !job.running);
+    $("#dt-status").textContent = job.running ? `Running${job.run_id ? " " + job.run_id : ""}…` : (job.error ? "Error: " + job.error : "");
+    const log = $("#dt-log");
+    log.classList.toggle("hidden", !job.lines.length);
+    log.textContent = job.lines.join("\n");
+    log.scrollTop = log.scrollHeight;
+    renderDtRuns(r.runs);
+    renderDtLive(L);
+    if (job.running && $("#tab-daytrader").classList.contains("active")) dtTimer = setTimeout(loadDaytrader, 3000);
+  } catch (e) { $("#dt-status").textContent = e.message; }
+}
+
+function renderDtRuns(runs) {
+  const head = `<thead><tr><th>Run</th><th>Engine</th><th>Days</th><th class="num">Trades</th><th class="num">Win</th><th class="num">Avg R</th><th class="num">PnL</th><th class="num">Return</th><th class="num">SPY</th><th>Verdict</th><th></th></tr></thead>`;
+  const rows = runs.map((x) => {
+    const engine = x.brain === "claude" ? `${x.model}/${x.effort}${x.learn === false ? " · frozen" : ""}` : x.brain;
+    const label = x.name || (x.created ? when(x.created) : x.id);
+    return `<tr><td>${esc(label)}<div class="small muted">${esc(x.status)}${x.leaky ? " · leaky dates" : ""}</div></td>
+      <td>${esc(engine)}</td><td>${esc(x.start)} → ${esc(x.end)}<div class="small muted">${x.days ?? 0} days</div></td>
+      <td class="num">${x.trades ?? 0}</td><td class="num">${pct(x.win_rate, 0)}</td>
+      <td class="num ${cls(x.avg_r)}">${x.avg_r == null ? "—" : (x.avg_r > 0 ? "+" : "") + x.avg_r.toFixed(2)}</td>
+      <td class="num ${cls(x.net_pnl)}">${money(x.net_pnl, true)}</td>
+      <td class="num ${cls(x.return_pct)}">${x.return_pct == null ? "—" : x.return_pct.toFixed(2) + "%"}</td>
+      <td class="num">${x.spy_pct == null ? "—" : x.spy_pct.toFixed(2) + "%"}</td>
+      <td class="small">${esc(x.verdict || "")}</td>
+      <td><a class="btn tiny ghost" href="/daytrader/report/${encodeURIComponent(x.id)}" target="_blank" rel="noopener">Report</a></td></tr>`;
+  }).join("");
+  $("#dt-runs").innerHTML = head + `<tbody>${rows || `<tr><td colspan="11" class="empty">No runs yet. Try the free gap-and-go control first, then Claude.</td></tr>`}</tbody>`;
+}
+
+function renderDtLive(L) {
+  const st = L.status;
+  const last = (L.days || []).slice(-1)[0];
+  $("#dt-live").innerHTML = (L.equity == null && !st) ? `<span class="muted">Not started yet.</span>` :
+    `<div>Equity <b>${money(L.equity)}</b> after ${(L.days || []).length} days${st ? ` · ${esc(st.day)}: ${esc(st.phase)}, focus ${esc((st.focus || []).join(", ") || "none")}` : ""}</div>` +
+    (last ? `<div class="muted">Last day ${esc(last.day)}: ${money(last.pnl, true)} on ${last.trades} trades. ${esc(last.summary || "")}</div>` : "") +
+    (L.has_report ? `<div><a href="/daytrader/report/live-live" target="_blank" rel="noopener">Open the live report</a></div>` : "");
+  $("#dt-playbook").innerHTML = `<thead><tr><th>Id</th><th>Status</th><th class="num">Trades</th><th class="num">R</th><th>Rule</th></tr></thead><tbody>` +
+    ((L.playbook || []).map((r) => `<tr><td>${esc(r.id)}</td><td>${esc(r.status)}</td><td class="num">${r.uses}</td><td class="num ${cls(r.sum_r)}">${r.sum_r.toFixed(1)}</td><td>${esc(r.text)}</td></tr>`).join("")
+      || `<tr><td colspan="5" class="empty">No live profile yet: run a backtest with "Save as profile: live", or start live trading.</td></tr>`) + "</tbody>";
+}
+
+$("#dt-run").addEventListener("click", async () => {
+  try {
+    await api("/api/daytrader/backtest", { method: "POST", body: {
+      start: $("#dt-start").value, end: $("#dt-end").value, brain: $("#dt-brain").value, learn: $("#dt-learn").checked,
+      name: $("#dt-name").value, save_profile: $("#dt-profile").value, model: SETTINGS.model, effort: SETTINGS.effort } });
+    toast("Day-trader backtest started");
+    loadDaytrader();
+  } catch (e) { toast(e.message); }
+});
+$("#dt-stop").addEventListener("click", async () => { await api("/api/daytrader/stop", { method: "POST" }); toast("Stopping after the current day"); });
 
 init().catch((e) => toast("Failed to load: " + e.message, 8000));

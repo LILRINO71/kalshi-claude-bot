@@ -7,6 +7,13 @@ ProcessOverProfit's [Kalshi AI trading bot](https://code.processoverprofit.blog/
 
 ![stack](https://img.shields.io/badge/python-3.10%2B-blue) ![mode](https://img.shields.io/badge/mode-paper%20only-green)
 
+> **New: an AI day trader for US stocks** ([`daytrader/`](daytrader/README.md)). Before the open, Claude reads the news,
+> picks the stocks to focus on, researches them and writes trade plans. It manages those plans through the session and
+> flattens before the close. After the close it reviews every decision and rewrites its own playbook, so its strategy
+> keeps evolving from real results. Backtests replay past days in order, learning as they go, with no look-ahead. It
+> runs on your Claude subscription through the Claude Code CLI and is paper only. Start it with
+> `python -m daytrader backtest`, from the dashboard's **Day trader** tab, or with `Start Day Trader.bat`.
+
 ## One-click start (Windows)
 
 1. On GitHub, click **Code → Download ZIP** and unzip it (or `git clone` it).
@@ -110,6 +117,13 @@ kalshibot/
   metrics.py     Wilson / bootstrap CIs, Brier, calibration, drawdown
   usage.py       usage aggregation
   web/           Flask dashboard (Chart.js)
+daytrader/       AI day trader for stocks (see daytrader/README.md)
+  session.py     one trading day: scan, brief, research, check-ins, flatten, reflect
+  prompts.py     every prompt and JSON schema Claude answers
+  memory.py      evolving playbook (outcome-scored rules) and layered lessons
+  broker.py      conservative paper broker (stops, targets, slippage, caps)
+  data.py        Yahoo bars, Google News + GDELT headlines, as-of views
+  backtest.py    walk-forward backtest; live.py: real-time paper trading
 tests/           offline unit tests (pytest)
 data/            settings, caches, backtest results, usage log (git-ignored)
 ```

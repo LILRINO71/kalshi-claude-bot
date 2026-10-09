@@ -3,10 +3,13 @@ import re
 
 from flask import Flask, jsonify, render_template, request
 
+from daytrader.web import bp as daytrader_bp
+
 from .. import backtest, claude_cli, config, storage, usage
 from ..live import get_trader
 
 app = Flask(__name__)
+app.register_blueprint(daytrader_bp)  # the AI day trader's tab
 RUN_ID = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$")
 
 

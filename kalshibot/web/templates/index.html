@@ -41,6 +41,7 @@
 <nav class="tabs" role="tablist">
   <button class="tab active" data-tab="backtest" role="tab">Backtest</button>
   <button class="tab" data-tab="live" role="tab">Live paper</button>
+  <button class="tab" data-tab="daytrader" role="tab">Day trader</button>
   <button class="tab" data-tab="usage" role="tab">Usage</button>
   <button class="tab" data-tab="settings" role="tab">Settings</button>
 </nav>
@@ -177,6 +178,43 @@
   <div class="card">
     <h3>Decisions this session</h3>
     <div class="table-wrap tall"><table class="table" id="live-dec"></table></div>
+  </div>
+</section>
+
+<!-- ============================== DAY TRADER ============================== -->
+<section id="tab-daytrader" class="tab-panel">
+  <div class="card">
+    <h2>AI day trader (US stocks, paper)</h2>
+    <p class="small muted">Before the open Claude reads the news, picks the stocks to focus on, researches them and writes trade plans. It manages them during the session, flattens before the close, then reviews the day and rewrites its own playbook. The backtest replays past days in order and learns as it goes, using the model and effort from the top bar. Only days after the model's training cutoff are allowed.</p>
+    <div class="form-grid">
+      <label class="field"><span>From</span><input type="date" id="dt-start"></label>
+      <label class="field"><span>To</span><input type="date" id="dt-end"></label>
+      <label class="field"><span>Brain</span><select id="dt-brain"><option value="claude">Claude (learns)</option><option value="gap_and_go">Gap-and-go (no AI control)</option><option value="none">No trades (control)</option></select></label>
+      <label class="field"><span>Save what it learns as profile</span><input type="text" id="dt-profile" placeholder="e.g. live (optional)"></label>
+      <label class="field span-2"><span>Run name (optional)</span><input type="text" id="dt-name" maxlength="80"></label>
+      <label class="check"><input type="checkbox" id="dt-learn" checked> Learn as it goes (off = frozen playbook, for comparison)</label>
+    </div>
+    <div class="row gap">
+      <button class="btn primary" id="dt-run">Run backtest</button>
+      <button class="btn ghost hidden" id="dt-stop">Stop after this day</button>
+      <span class="small muted" id="dt-status"></span>
+    </div>
+    <pre class="dt-log hidden" id="dt-log"></pre>
+  </div>
+  <div class="card">
+    <h3>Runs</h3>
+    <div class="table-wrap"><table class="table" id="dt-runs"></table></div>
+  </div>
+  <div class="grid-2">
+    <div class="card">
+      <h3>Live paper account</h3>
+      <div id="dt-live" class="small"></div>
+      <p class="small muted">Live trading runs in its own window: <code>python -m daytrader live</code> (or Start Day Trader.bat). Its morning brief alone: <code>python -m daytrader premarket</code>.</p>
+    </div>
+    <div class="card">
+      <h3>Playbook (live profile)</h3>
+      <div class="table-wrap"><table class="table" id="dt-playbook"></table></div>
+    </div>
   </div>
 </section>
 

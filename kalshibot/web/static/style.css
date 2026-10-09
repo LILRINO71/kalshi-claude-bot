@@ -236,3 +236,5 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
   .span-2, .check { grid-column: span 1; }
   .engine { margin-left: 0; }
 }
+
+.dt-log { max-height: 220px; overflow: auto; font: 12px/1.45 "JetBrains Mono", Consolas, monospace; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; white-space: pre-wrap; margin: 12px 0 0; }
