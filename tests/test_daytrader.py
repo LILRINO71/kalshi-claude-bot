@@ -303,7 +303,7 @@ class ScriptedBrain:
 
 
 def run_day(brain, **kw):
-    c = cfg(checkins=["10:30", "13:00"], **kw)
+    c = cfg(**{"checkins": ["10:30", "13:00"], **kw})
     data = FakeData()
     mem = Memory(store.PROFILES / "t")
     s = DaySession(DAY, c, data, brain, mem, 25000, log=lambda *_: None)
@@ -361,6 +361,8 @@ def test_gap_and_go_control_runs_without_claude(monkeypatch):
     monkeypatch.setattr(llm, "ask", lambda *a, **k: pytest.fail("control must not call Claude"))
     s, row, mem = run_day(brains.GapAndGoBrain(cfg()))
     assert s.focus == ["AAA"] and row["trades"] == 1
+    assert s.broker.orders[0]["size"] == 1.0  # controls cite no rules but are never sized down
+    assert row["base_rates"] and mem.state["base"] == []  # nothing is learned by a control
 
 
 # ---------------------------------------------------------------- prompts, parsing, guards
@@ -416,21 +418,38 @@ def test_headline_mentions_need_whole_words():
 
 
 def test_dashboard_routes(monkeypatch):
-    from kalshibot.web.app import app
+    from daytrader import web
     started = {}
     monkeypatch.setattr(backtest, "run", lambda *a, **k: started.update(args=a, kwargs=k))
-    client = app.test_client()
-    assert client.get("/api/daytrader/runs").get_json()["runs"] == []
-    bad = client.post("/api/daytrader/backtest", json={"start": "2026-05-01", "end": "2026-05-10", "model": "opus"})
+    client = web.app.test_client()
+    assert client.get("/").status_code == 200
+    assert client.get("/api/runs").get_json()["runs"] == []
+    assert set(client.get("/api/meta").get_json()["models"]) == {"haiku", "sonnet", "opus", "fable"}
+    bad = client.post("/api/backtest", json={"start": "2026-05-01", "end": "2026-05-10", "model": "opus"})
     assert bad.status_code == 400 and "remember" in bad.get_json()["error"]
-    ok = client.post("/api/daytrader/backtest", json={"start": "2026-08-11", "end": "2026-08-20", "brain": "gap_and_go"})
+    ok = client.post("/api/backtest", json={"start": "2026-08-11", "end": "2026-08-20", "brain": "gap_and_go"})
     assert ok.status_code == 200
-    from daytrader import web
     web._job["thread"].join(5)
     assert started["args"][1:] == ("2026-08-11", "2026-08-20") and started["args"][0]["brain"] == "gap_and_go"
-    assert client.get("/daytrader/report/../../etc").status_code == 404
-    assert client.get("/daytrader/report/20260101-000000-abcd").status_code == 404
-    assert client.get("/api/daytrader/live").get_json()["playbook"] == []
+    assert client.get("/report/../../etc").status_code == 404
+    assert client.get("/report/20260101-000000-abcd").status_code == 404
+    assert client.get("/api/live").get_json()["playbook"] == []
+    assert client.get("/api/usage").get_json()["all_time"]["calls"] == 0
+    assert client.post("/api/settings", json={"risk_per_trade_pct": 99}).status_code == 400
+    assert client.post("/api/settings", json={"focus_max": 3}).get_json()["focus_max"] == 3
+    assert client.get("/api/compare?ids=x").status_code == 400
+    assert client.delete("/api/runs/20260101-000000-abcd").status_code == 404
+    from daytrader import alpaca
+    for k in ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    meta = client.get("/api/meta").get_json()
+    assert meta["alpaca"] is False and meta["clean_start"] == "2026-07-01"
+    assert client.post("/api/alpaca", json={"key_id": "k"}).status_code == 400
+    monkeypatch.setattr(alpaca, "fetch", lambda tks, a, b, *x, **k: {"SPY": {a: [(0, 1, 1, 1, 1, 1)] * 3}})
+    ok = client.post("/api/alpaca", json={"key_id": "k", "secret_key": "s"})
+    assert ok.status_code == 200 and "3 SPY bars" in ok.get_json()["check"]
+    meta = client.get("/api/meta").get_json()
+    assert meta["alpaca"] is True and meta["history_start"] == "2026-07-01"
 
 
 def test_report_renders_a_run(tmp_path):
@@ -574,3 +593,283 @@ def test_claude_steps_retry_once_after_a_bad_answer(monkeypatch):
     monkeypatch.setattr(llm, "ask", lambda *a, **k: (_ for _ in ()).throw(llm.LLMError("limit", "limit")))
     with pytest.raises(llm.LLMError):
         brain._call("reflect", "p", {})
+
+
+# ---------------------------------------------------------------- learning ledgers and counterfactuals
+
+def test_replay_simulates_one_order_with_the_broker_rules():
+    from daytrader import replay
+    bars = [bar("09:35", 99.5, 99.9, 99.4, 99.8), bar("09:40", 99.9, 100.4, 99.8, 100.3),
+            bar("09:45", 100.3, 102.5, 100.2, 102.4), bar("09:50", 102.4, 102.6, 102.0, 102.1)]
+    order = {"ticker": "AAA", "side": "long", "kind": "stop", "price": 100.0, "stop": 99.0, "target": 102.0,
+             "active_from": clock.at(DAY, "09:35")}
+    res = replay.simulate(order, bars, cfg(slippage_bps=0), clock.at(DAY, "15:55"))
+    assert res["exit_reason"] == "target" and res["r"] == pytest.approx((102.0 - 100.01) / (100.01 - 99.0), abs=0.01)
+    never = {**order, "price": 105.0, "stop": 104.0, "target": 107.0}
+    assert replay.simulate(never, bars, cfg(), clock.at(DAY, "15:55")) is None
+
+
+def test_mechanical_setups_are_built_from_finished_bars_only():
+    from daytrader import replay
+    data = FakeData()
+    reg = [b for b in data.bars["AAA"] if b[0] >= clock.at(DAY, "09:30")]
+    pm = features.premarket_stats([b for b in data.bars["AAA"] if b[0] < clock.at(DAY, "09:30")], 100.0)
+    daily = features.daily_stats(data.daily("AAA", DAY))
+    orders = dict(replay.mechanical_orders("AAA", DAY, reg, pm, daily, 300, clock.at(DAY, "15:55")))
+    assert set(orders) == {"orb_with_gap", "orb_against_gap", "pm_break", "trend_1030"}
+    orb_high = max(b[2] for b in reg[:3])
+    assert orders["orb_with_gap"]["active_from"] == clock.at(DAY, "09:45")
+    assert orders["orb_with_gap"]["price"] == pytest.approx(orb_high + 0.01, abs=0.006)
+    assert orders["orb_with_gap"]["side"] == "long" and orders["orb_against_gap"]["side"] == "short"
+    assert orders["trend_1030"]["kind"] == "market" and orders["trend_1030"]["side"] == "long"
+
+
+def test_a_day_records_base_rates_track_record_and_plan_outcomes():
+    brain = ScriptedBrain()
+    s, row, mem = run_day(brain)
+    t = s.broker.trades[0]
+    plan = s.plans[0]
+    assert plan["status"].startswith("filled") and plan["result_r"] == t["r"]
+    assert row["base_rates"] and {b["setup"] for b in row["base_rates"]} >= {"orb_with_gap", "trend_1030"}
+    assert any(b["ticker"] == "AAA" and b["setup"] == "orb_with_gap" and b["r"] > 0 for b in row["base_rates"])
+    assert mem.state["base"] and mem.state["track"][0]["r"] == t["r"]
+    assert mem.state["track"][0]["origin"] == "premarket" and mem.state["track"][0]["mfe_r"] is not None
+    text = prompts.reflect(brain.seen["reflect"])
+    assert "MECHANICAL SETUPS ON TODAY'S SCANNER NAMES" in text and "AAA: orb_with_gap long" in text
+    assert "filled" in text and "YOUR TRACK RECORD" in text
+    assert "opening-range" in mem.base_rates_text() and "Pre-market plans 1" in mem.track_text()
+
+
+def test_checkin_changes_are_priced_against_the_plan_left_alone():
+    class Exiter(ScriptedBrain):
+        def checkin(self, ctx):
+            self.seen.setdefault("checkins", []).append(ctx)
+            acts = [{"ticker": "AAA", "action": "exit_now", "why": "nerves"}] if ctx["tickers"][0]["position"] else []
+            return {"market_read": "", "actions": acts}, {"llm": True, "latency_s": 40}
+    brain = Exiter()
+    s, row, mem = run_day(brain)
+    m = row["mgmt"]
+    assert len(m) == 1 and m[0]["action"] == "exit"
+    assert m[0]["untouched_r"] > m[0]["actual_r"] and m[0]["delta_r"] < 0  # the trend ran on without us
+    assert "left alone it would have made" in s.plans[0]["untouched"]
+    assert "Early exits 1x" in mem.mgmt_text() and "1 hurt" in mem.mgmt_text()
+    assert "PRICED AGAINST THE SAME PLAN LEFT ALONE" in prompts.reflect(brain.seen["reflect"])
+
+
+def test_cancelling_a_plan_that_would_have_lost_counts_as_help():
+    class Canceller(ScriptedBrain):
+        def research(self, ctx):
+            answer, meta = super().research(ctx)
+            p = answer["plans"][0]
+            p.update({"side": "short", "entry_type": "limit", "entry": round(p["entry"] * 1.004, 2),
+                      "stop": round(p["entry"] * 1.012, 2), "target": round(p["entry"] * 0.97, 2),
+                      "valid_until": "15:00"})
+            return answer, meta
+
+        def checkin(self, ctx):
+            self.seen.setdefault("checkins", []).append(ctx)
+            working = ctx["tickers"][0]["orders"]
+            acts = [{"ticker": "AAA", "action": "cancel", "why": "trend too strong"}] if working else []
+            return {"market_read": "", "actions": acts}, {"llm": True, "latency_s": 10}
+    s, row, _ = run_day(Canceller(), checkins=["09:40"])
+    m = row["mgmt"]
+    assert m and m[0]["action"] == "cancel" and m[0]["actual_r"] == 0 and m[0]["delta_r"] >= 0
+
+
+def test_plans_relying_only_on_trial_rules_are_sized_down():
+    mem = Memory(store.PROFILES / "t")
+    trial = mem.add_rule("When a stock gaps on guidance, buy the pre-market high break", ["gap"], PREV)
+    mem.save()
+
+    class TrialOnly(ScriptedBrain):
+        def research(self, ctx):
+            answer, meta = super().research(ctx)
+            answer["plans"][0]["rules_used"] = [trial["id"]]
+            return answer, meta
+    s, _, _ = run_day(TrialOnly())
+    assert s.broker.orders[0]["size"] == 0.5 and "trial" in s.plans[0]["size_capped"]
+    full, _, _ = run_day(ScriptedBrain())  # cites the active seed rule R1: full size
+    assert full.broker.orders[0]["size"] == 1.0 and "size_capped" not in full.plans[0]
+
+
+def test_duplicate_rules_are_dropped_and_repeated_lessons_reinforce(tmp_path):
+    m = Memory(tmp_path / "mem", seed=False)
+    a = m.add_rule("When a large-cap gaps up on earnings and holds above VWAP at 10:00, buy the first pullback",
+                   ["gap"], DAY)
+    assert m.add_rule("When a large-cap gaps up on earnings and holds above VWAP at 10:00, buy the first "
+                      "pullback with a stop under the low", [], DAY) is None
+    twin, _ = m.similar_rule("when a large cap gaps up on earnings and holds above vwap at 10:00, buy the first pullback")
+    assert twin is a
+    assert m.add_rule("When SPY is down more than 1% by 10:00, do not open new longs", [], DAY)
+    loser = m.add_rule("When a stock is up 10% pre-market with no news, short the open", [], DAY)
+    m.retire_rule(loser["id"], DAY, "losing on evidence: 6 trades, -3.00R")
+    assert m.add_rule("When a stock is up 10% pre-market with no news, short the open hard", [], DAY) is None
+    l1 = m.add_lesson("Earnings gap-ups in semis that hold VWAP at 10:00 tend to trend into the close", DAY,
+                      importance=5)
+    m.end_day()
+    l2 = m.add_lesson("Semis earnings gap-ups that hold VWAP at 10:00 tend to trend into the close", "2026-08-13",
+                      importance=5)
+    assert l2 is l1 and l1["importance"] == 6 and l1["reinforced_on"] == "2026-08-13" and len(m.lessons) == 1
+    other = m.add_lesson("Biotech gap-downs on FDA news keep falling after the first bounce", "2026-08-13")
+    assert other is not l1 and len(m.lessons) == 2
+
+
+def test_base_rates_warm_up_only_uses_days_before_the_start():
+    mem = Memory(store.PROFILES / "w")
+    n = backtest.warm_up_base_rates(mem, FakeData(), cfg(), "2026-08-13", log=lambda *_: None)
+    assert n > 0 and {b["day"] for b in mem.state["base"]} == {DAY} and all(b["di"] < 0 for b in mem.state["base"])
+    assert "Last 1 session," in mem.base_rates_text()
+    assert backtest.warm_up_base_rates(mem, FakeData(), cfg(), "2026-08-13", log=lambda *_: None) == 0  # once only
+    assert backtest.warm_up_base_rates(Memory(store.PROFILES / "w2"), FakeData(), cfg(), DAY,
+                                       log=lambda *_: None) == 0  # nothing earlier than the start day exists
+
+
+def test_frozen_runs_record_no_evidence_but_still_report_base_rates():
+    s, row, mem = run_day(ScriptedBrain(), learn=False)
+    assert row["base_rates"] and mem.state["track"] == [] and mem.state["base"] == []
+    assert mem.rule("R1")["uses"] == 0 and len(mem.rules) == 6
+
+
+def test_track_record_text_breaks_results_down():
+    m = Memory(store.PROFILES / "tr", seed=False)
+    rows = [("09:35", -1.0, "premarket", "stop"), ("09:40", -1.0, "premarket", "stop"),
+            ("10:15", 2.0, "premarket", "target"), ("11:45", 0.5, "checkin", "manual")]
+    for i, (entry, r, origin, reason) in enumerate(rows):
+        m.record_track({"day": DAY, "ticker": "AAA", "side": "long", "r": r, "entry": entry, "origin": origin,
+                        "exit_reason": reason, "mfe_r": max(r, 0.6), "confidence": 0.6 if i % 2 else 0.4})
+    text = m.track_text()
+    assert "Entered 09:30-09:59 2: -1.00R avg" in text and "10:00-11:29 1: +2.00R avg" in text
+    assert "Check-in entries 1" in text and "Your early exits 1" in text and "Profit capture" in text
+    assert "Confidence >= 0.55 2" in text
+
+
+def test_compare_pairs_runs_day_by_day_and_verdicts_need_evidence():
+    from daytrader import metrics
+
+    def state(rid, pnls, brain="claude"):
+        days = [{"day": f"2026-08-{10 + i:02d}", "pnl": p, "start_equity": 25000.0} for i, p in enumerate(pnls)]
+        trades = [{"day": d["day"], "pnl": d["pnl"], "r": d["pnl"] / 125} for d in days if d["pnl"]]
+        return {"id": rid, "config": {"brain": brain, "model": "sonnet", "effort": "medium", "learn": True},
+                "days": days, "trades": trades}
+    base = state("a", [-50, 20, -30, 10, -40, 0, -20], "gap_and_go")
+    better = state("b", [60, 80, 40, 90, 70, 50, 30] + [10])  # one extra day the baseline lacks
+    c = metrics.compare([base, better])
+    assert len(c["days"]) == 7 and c["runs"][1]["vs_baseline"]["mean_daily_pct_diff"] > 0
+    assert "better than the baseline" in c["runs"][1]["vs_baseline"]["verdict"]
+    first, second = state("p1", [10, -20, 30]), state("p2", [5, 5, 5, 5, 5, 5, 5, 5])
+    second["days"] = [{**d, "day": f"2026-08-{13 + i:02d}"} for i, d in enumerate(second["days"])]
+    second["trades"] = [{**t, "day": f"2026-08-{13 + i:02d}"} for i, t in enumerate(second["trades"])]
+    joined = metrics.merge_runs([first, second])
+    assert joined["id"] == "p1+p2" and len(joined["days"]) == 11 and len(joined["trades"]) == 11
+    with pytest.raises(ValueError, match="overlap"):
+        metrics.merge_runs([first, first])
+    assert len(metrics.compare([base, joined])["days"]) == 7
+    assert "Too few trades" in metrics.verdict([0.5] * 10, 0.4, 0.6)
+    assert "above zero" in metrics.verdict([0.5, 0.6] * 20, 0.1, 0.9)
+    assert metrics.trades_needed([1.0, -0.5] * 10) > 0
+
+
+# ---------------------------------------------------------------- longer history and market regimes
+
+def _no_alpaca_env(monkeypatch):
+    for k in ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_alpaca_keys_come_from_env_or_the_saved_file(monkeypatch):
+    from daytrader import alpaca
+    _no_alpaca_env(monkeypatch)
+    assert not alpaca.configured()
+    alpaca.save_keys(" AK123 ", "secret ")
+    assert alpaca.keys() == ("AK123", "secret") and alpaca.key_file().parent == store.DATA
+    monkeypatch.setenv("APCA_API_KEY_ID", "envkey")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "envsecret")
+    assert alpaca.keys() == ("envkey", "envsecret")
+
+
+def test_alpaca_bars_are_normalized_like_yahoo():
+    from daytrader import alpaca
+    bars = [{"t": "2026-07-14T12:00:00Z", "o": 10, "h": 10.2, "l": 9.9, "c": 10.1, "v": 500},   # 08:00 pre-market
+            {"t": "2026-07-14T13:30:00Z", "o": 10.1, "h": 10.0, "l": 10.05, "c": 10.3, "v": 900},  # 09:30, bad h/l
+            {"t": "2026-07-14T20:15:00Z", "o": 10.3, "h": 10.4, "l": 10.2, "c": 10.25, "v": 80}]  # 16:15 after hours
+    rows = alpaca.normalize(bars)["2026-07-14"]
+    assert [clock.hhmm(r[0]) for r in rows] == ["08:00", "09:30", "16:15"]
+    assert rows[0][5] == 0 and rows[2][5] == 0 and rows[1][5] == 900   # only regular-session volume, like Yahoo
+    assert rows[1][2] == 10.3 and rows[1][3] == 10.05                  # high/low always contain open and close
+
+
+def test_alpaca_maps_share_classes_and_skips_unknown_symbols(monkeypatch):
+    from daytrader import alpaca
+    _no_alpaca_env(monkeypatch)
+    alpaca.save_keys("k", "s")
+    monkeypatch.setattr(alpaca, "GAP_S", 0)
+    asked = []
+
+    class Resp:
+        def __init__(self, code, js=None, text=""):
+            self.status_code, self._js, self.text = code, js, text
+
+        def json(self):
+            return self._js
+
+    def fake_get(url, params, headers, timeout):
+        syms = params["symbols"].split(",")
+        asked.append(syms)
+        if "ZZZZ" in syms:
+            return Resp(400, text='{"message":"invalid symbol: ZZZZ"}')
+        bar = {"t": "2026-07-14T13:30:00Z", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10}
+        return Resp(200, {"bars": {s: [bar] for s in syms}, "next_page_token": None})
+    monkeypatch.setattr(alpaca._session, "get", fake_get)
+    got = alpaca.fetch(["BRK-B", "ZZZZ", "AAPL"], "2026-07-14", "2026-07-14", log=lambda *_: None)
+    assert asked[0] == ["BRK.B", "ZZZZ", "AAPL"] and asked[1] == ["BRK.B", "AAPL"]
+    assert got["BRK-B"]["2026-07-14"][0][4] == 1.5 and got["ZZZZ"] == {}
+
+
+def test_days_older_than_yahoo_come_from_alpaca_and_are_cached(monkeypatch):
+    from daytrader import alpaca, data as data_mod
+    _no_alpaca_env(monkeypatch)
+    old = "2026-07-14"
+    md = data_mod.MarketData()
+    assert old < md.yahoo_oldest() and md.intraday("AAA", old) == []   # no key: nothing, and no error
+    alpaca.save_keys("k", "s")
+    calls = []
+
+    def fake_fetch(tickers, first, last, interval="5m", log=None):
+        calls.append((tuple(tickers), first, last))
+        return {tk: {old: [(clock.at(old, "09:30"), 1.0, 1.1, 0.9, 1.05, 100)]} for tk in tickers}
+    monkeypatch.setattr(alpaca, "fetch", fake_fetch)
+    monkeypatch.setattr(data_mod.MarketData, "daily_all", lambda self, tk, need_day=None: [])  # stay offline
+    md = data_mod.MarketData()
+    md.prefetch(["AAA"], [old], log=lambda *_: None)
+    assert calls and set(calls[0][0]) >= {"AAA", "SPY"}
+    again = data_mod.MarketData()                                       # a new process reads the disk cache
+    assert again.intraday("AAA", old)[0][4] == 1.05 and len(calls) == 1
+
+
+def test_market_regimes_label_days_and_split_results():
+    from daytrader import metrics, regime
+
+    class Daily:
+        def __init__(self):
+            days = [f"2026-07-{d:02d}" for d in range(6, 11)]
+            closes = [100, 100.2, 97.0, 97.1, 97.0]
+            self.rows = {"SPY": [(d, c, c * 1.003, c * 0.997, c, 1) for d, c in zip(days, closes)]}
+            self.rows["SPY"][2] = (days[2], 99.0, 100.0, 96.5, 97.0, 1)     # a 3% range day
+            self.rows["^VIX"] = [(d, 0, 0, 0, v, 0) for d, v in zip(days, [14, 15, 24, 18, 15])]
+            for i in range(30):
+                self.rows[f"S{i}"] = [(d, 1, 1, 1, c, 1) for d, c in zip(days, [10, 10.05, 9.0, 9.02, 9.01])]
+
+        def daily_all(self, tk, need_day=None):
+            return self.rows.get(tk, [])
+    data = Daily()
+    g = regime.gauges(data, [f"S{i}" for i in range(30)])
+    assert g["2026-07-07"]["label"] == "calm" and g["2026-07-08"]["label"] == "volatile"
+    assert g["2026-07-09"]["label"] == "normal" and g["2026-07-08"]["movers"] == 100.0
+    days = [{"day": d, "pnl": p, "start_equity": 25000, "trades": 1,
+             "base_rates": [{"r": p / 100}]} for d, p in [("2026-07-07", 50), ("2026-07-08", -100)]]
+    trades = [{"day": d["day"], "pnl": d["pnl"], "r": d["pnl"] / 125} for d in days]
+    split = metrics.by_market_regime(days, trades, g)
+    assert split["volatile"]["trades"] == 1 and split["volatile"]["avg_r"] == pytest.approx(-0.8)
+    assert split["calm"]["day_pnl"] == 50 and split["calm"]["base_avg_r"] == pytest.approx(0.5)
+    month = regime.monthly(g)[0]
+    assert month["month"] == "2026-07" and month["volatile"] == 1 and month["calm"] >= 1

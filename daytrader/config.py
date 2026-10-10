@@ -1,7 +1,13 @@
 """Day-trader settings: defaults, validation, and the models' knowledge cutoffs."""
-from kalshibot.config import EFFORTS, MODELS
-
 from . import store
+
+MODELS = {
+    "sonnet": "Sonnet 5.5 (default: strong and quick)",
+    "opus": "Opus 5.5 (strongest, heaviest on usage limits)",
+    "haiku": "Haiku 5.5 (lightest on usage limits)",
+    "fable": "Fable 5.1 (most capable, may need extra usage)",
+}
+EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 BRAINS = {
     "claude": "Claude: scans news, picks stocks, plans, trades, reflects and rewrites its playbook",
@@ -13,7 +19,7 @@ BRAINS = {
 # before the model's cutoff is refused unless --allow-leaky is passed. Opus 5.5's cutoff is June
 # 2026; the others are not published here, so they default to the same date. Override per model in
 # settings.json ("knowledge_cutoff": {"sonnet": "YYYY-MM-DD"}) if you know better.
-KNOWLEDGE_CUTOFF = {"haiku": "2025-07-31", "sonnet": "2026-06-30", "opus": "2026-06-30", "fable": "2026-06-30"}
+KNOWLEDGE_CUTOFF = {"haiku": "2026-06-30", "sonnet": "2026-06-30", "opus": "2026-06-30", "fable": "2026-06-30"}
 
 DEFAULTS = {
     "brain": "claude",
@@ -39,6 +45,8 @@ DEFAULTS = {
     "learn": True,                # reflect after each day and evolve the playbook
     "curate_every": 5,            # trading days between playbook consolidations
     "max_rules": 25,              # playbook size cap
+    "trial_size_cap": 0.5,        # plans that rely only on unproven (trial) rules trade at most this size
+    "baserate_names": 15,         # scanner names the desk replays mechanical setups on after each close
     "memory_k": 6,                # lessons retrieved into each prompt
     "news_per_ticker": 8,
     "market_news": 20,
@@ -51,9 +59,9 @@ DEFAULTS = {
 
 _NUM = ("bankroll", "scan_top", "focus_max", "risk_per_trade_pct", "max_position_pct", "max_leverage",
         "max_positions", "max_daily_loss_pct", "slippage_bps", "commission_per_share", "commission_min",
-        "curate_every", "max_rules", "memory_k", "news_per_ticker", "market_news")
-_INT = ("scan_top", "focus_max", "max_positions", "curate_every", "max_rules", "memory_k", "news_per_ticker",
-        "market_news")
+        "curate_every", "max_rules", "trial_size_cap", "baserate_names", "memory_k", "news_per_ticker", "market_news")
+_INT = ("scan_top", "focus_max", "max_positions", "curate_every", "max_rules", "baserate_names", "memory_k",
+        "news_per_ticker", "market_news")
 
 
 def load():
@@ -85,6 +93,10 @@ def validate(cfg):
         raise ValueError("focus_max and max_positions must be 1-10")
     if not 0 < out["max_leverage"] <= 4:
         raise ValueError("max_leverage must be in (0, 4]")
+    if not 0.25 <= out["trial_size_cap"] <= 1:
+        raise ValueError("trial_size_cap must be 0.25-1.0")
+    if not 0 <= out["baserate_names"] <= 40:
+        raise ValueError("baserate_names must be 0-40")
     out["universe"] = [str(t).upper() for t in (out["universe"] or [])]
     times = {}
     for k in ("premarket_time", "flatten_time"):

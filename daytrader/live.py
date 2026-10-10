@@ -48,6 +48,10 @@ def run(cfg, profile="live", once=False, log=print):
     folder.mkdir(parents=True, exist_ok=True)
     memory = Memory(folder, seed=True)
     brain = brains.make(cfg, "live")
+    if cfg["learn"] and brain.learns:
+        from .backtest import warm_up_base_rates
+        if warm_up_base_rates(memory, data, cfg, clock.today_et(), log=log):
+            memory.save()
     acct = store.read_json(ACCOUNT, None, strict=True) or {"equity": cfg["bankroll"], "days": [], "trades": []}
     log(f"Live paper trading | profile '{profile}' | equity ${acct['equity']:,.2f} | brain {cfg['brain']}"
         + (f" {cfg['model']}/{cfg['effort']}" if cfg["brain"] == "claude" else ""))
@@ -89,8 +93,8 @@ def run(cfg, profile="live", once=False, log=print):
             s.close()
             row = s.reflect(clock.now_ts(), learn=False)
         acct["equity"] = row["end_equity"]
-        acct["days"].append({k: row[k] for k in ("day", "pnl", "trades", "start_equity", "end_equity", "focus",
-                                                 "summary", "rule_changes")})
+        acct["days"].append({k: row.get(k) for k in ("day", "pnl", "trades", "start_equity", "end_equity", "focus",
+                                                     "summary", "rule_changes", "mgmt", "base_rates", "calls")})
         acct["trades"].extend({**t, "day": day} for t in s.broker.trades)
         store.write_json(ACCOUNT, acct)
         _status(s, "done")

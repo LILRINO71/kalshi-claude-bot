@@ -9,10 +9,13 @@ time. Claude's decisions take effect only after its real response time.
 """
 import re
 
-from . import clock, features
+from . import clock, features, replay
 from .broker import Broker
 from .llm import LLMError
 from .universe import INDEX_ETFS, STOCKS, aliases, name_of, sector_of
+
+# When several check-in actions touched one plan, the one credited with the difference it made.
+_ACTION_RANK = {"exit": 0, "adjust": 1, "cancel": 2, "replace": 3}
 
 CONTEXT = list(INDEX_ETFS)
 
@@ -58,6 +61,7 @@ class DaySession:
         self.brief, self.reflection = None, None
         self.processed = {}
         self._recorded = False
+        self.mgmt, self.base = [], []
         self.calls = {"made": 0, "cached": 0, "errors": 0, "latency_s": 0.0}
         self.market_news, self.ticker_news, self.fps, self.market_fp = [], {}, {}, []
         close = data.session_close(day)
@@ -95,10 +99,12 @@ class DaySession:
 
     # ------------------------------------------------------------ pre-market
 
-    def premarket(self, now):
+    def scan_market(self, now, news=True):
+        """Rank the universe before the open. Returns (index context rows, ranked stock rows). With
+        news=False it uses bars only (no headline or filing lookups), for warming up base rates."""
         view = self.data.view(now)
         prev_close_ts = clock.at(self.data.prev_trading_day(self.day), "16:00")
-        self.market_news = view.news_market(prev_close_ts, now, self.cfg["market_news"])
+        self.market_news = view.news_market(prev_close_ts, now, self.cfg["market_news"]) if news else []
         mentions = {}
         for item in self.market_news:
             for tk in mentioned(item["title"], self.universe):
@@ -110,7 +116,7 @@ class DaySession:
                 continue
             pre, _ = self._bars(view, tk)
             pm = features.premarket_stats(pre, d["prev_close"])
-            filings = view.sec_filings(tk, prev_close_ts - 4 * 3600, now) if tk not in CONTEXT else []
+            filings = view.sec_filings(tk, prev_close_ts - 4 * 3600, now) if news and tk not in CONTEXT else []
             catalyst = 1.0 * any("earnings" in f["title"] for f in filings) + 0.5 * bool(filings)
             fp = features.fingerprint(d, pm, sector_of(tk), mentions.get(tk, 0))
             if any("earnings" in f["title"] for f in filings):
@@ -121,6 +127,11 @@ class DaySession:
         context = {r["ticker"]: r for r in rows if r["ticker"] in CONTEXT}
         stocks = [r for r in rows if r["ticker"] not in CONTEXT]
         stocks.sort(key=lambda r: (r["score"] + 0.5 * min(r["news_mentions"], 3)), reverse=True)
+        return context, stocks
+
+    def premarket(self, now):
+        view = self.data.view(now)
+        context, stocks = self.scan_market(now)
         self.scan = stocks[:self.cfg["scan_top"]]
         if not self.scan:
             self.log("No scan data for this day (missing bars); skipping", "warn", now)
@@ -132,6 +143,7 @@ class DaySession:
                "playbook": self.memory.playbook_text(),
                "lessons": self.memory.recall(query, [r["ticker"] for r in self.scan[:8]], self.cfg["memory_k"],
                                              self.market_fp),
+               "track": self.memory.track_text(), "base_rates": self.memory.base_rates_text(),
                "recent_days": self.memory.journal()[-3:], "focus_max": self.cfg["focus_max"], "cfg": self.cfg}
         brief, _ = self._ask("morning brief", self.brain.morning, ctx, now)
         if not brief:
@@ -166,7 +178,8 @@ class DaySession:
                              "lessons": self.memory.recall(f"{tk} {sector_of(tk)} {f.get('why', '')}", [tk],
                                                            max(2, self.cfg["memory_k"] // 2), fp)})
         ctx = {"day": self.day, "now": now, "brief": self.brief, "research": research, "context": context,
-               "playbook": self.memory.playbook_text(), "cfg": self.cfg}
+               "playbook": self.memory.playbook_text(), "base_rates": self.memory.base_rates_text(),
+               "stock_base_rates": self.memory.base_rates_for(self.focus), "cfg": self.cfg}
         answer, latency = self._ask("research", self.brain.research, ctx, now)
         if answer:
             self._place_plans(answer.get("plans") or [], max(now + latency, clock.at(self.day, "09:30")), "premarket",
@@ -204,16 +217,43 @@ class DaySession:
                 continue
             start = max(active_from, self._t(p.get("valid_from"), clock.at(self.day, "09:35"))) \
                 if origin == "premarket" else active_from
+            rules = [str(r) for r in (p.get("rules_used") or [])][:3]
+            size = self._size(p.get("size"))
+            # Only a trader that learns has unproven ideas; the fixed-rule controls always trade full size.
+            cap = self.memory.size_cap(rules, self.cfg["trial_size_cap"]) if self.brain.learns else 1.0
+            if size > cap:
+                plan["size_capped"] = f"{size:.2f} -> {cap:.2f}: cites only rules still on trial"
+                size = cap
             order = {"ticker": tk, "side": p.get("side"), "kind": p.get("entry_type"),
                      "price": p.get("entry"), "stop": p.get("stop"), "target": p.get("target"),
                      "active_from": start, "expires": self._t(p.get("valid_until"), self.flatten_ts),
                      "time_exit": self._t(p.get("time_exit"), None), "breakeven_at": p.get("breakeven_at"),
-                     "size": p.get("size", 1.0), "plan_id": plan["id"], "rules": (p.get("rules_used") or [])[:3],
+                     "size": size, "plan_id": plan["id"], "rules": rules,
                      "setup": p.get("setup", ""), "confidence": p.get("confidence")}
+            replaced = [self._plan_of(o["plan_id"]) for o in self.broker.working(tk)]
             o, err = self.broker.submit(order, active_from)
             plan["status"] = f"rejected: {err}" if err else "working"
             plan["order_id"] = o["id"]
+            plan["order"] = {k: v for k, v in order.items() if k not in ("rules", "setup", "confidence")}
+            if not err:
+                for old in replaced:
+                    self._touch(old, "replace", active_from)
             self.memory.cite(order["rules"])
+
+    @staticmethod
+    def _size(x):
+        try:
+            return min(1.0, max(0.25, float(x if x is not None else 1.0)))
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _plan_of(self, plan_id):
+        return next((p for p in self.plans if p["id"] == plan_id), None)
+
+    def _touch(self, plan, action, ts):
+        """Note that a check-in changed this plan, so the day's review can price the change."""
+        if plan is not None:
+            plan.setdefault("touched", []).append({"t": ts, "action": action})
 
     def _t(self, hhmm, default):
         if not hhmm:
@@ -262,14 +302,20 @@ class DaySession:
             tk = str(a.get("ticker", "")).upper()
             act = a.get("action")
             err = None
+            held = self._plan_of((b.positions.get(tk) or {}).get("plan_id"))
             if act == "exit_now":
                 err = b.exit_at_next_bar(tk, at_ts)
+                if not err:
+                    self._touch(held, "exit", at_ts)
             elif act == "cancel":
                 b.schedule(at_ts, tk, "cancel", why=a.get("why", "check-in"))
+                for o in b.working(tk):
+                    self._touch(self._plan_of(o["plan_id"]), "cancel", at_ts)
             elif act == "adjust":
                 # Like every other action, it only takes effect once the answer exists.
                 b.schedule(at_ts, tk, "adjust", stop=a.get("stop"), target=a.get("target"),
                            time_exit=self._t(a.get("time_exit"), None))
+                self._touch(held, "adjust", at_ts)
             elif act == "new_entry":
                 new_plans.append(a)
             elif act not in ("hold", None):
@@ -303,6 +349,7 @@ class DaySession:
         self.advance_to(now)
         if not self.tickers_in_play():
             return  # nothing focused, held or working: no call needed
+        self._sync_plans()
         view = self.data.view(now)
         b = self.broker
         context = {}
@@ -324,7 +371,8 @@ class DaySession:
                             "plans": [p for p in self.plans if p["ticker"] == tk][-2:], "news": news})
         ctx = {"day": self.day, "now": now, "close_ts": self.flatten_ts, "tickers": tickers, "context": context,
                "equity": b.equity(), "start_equity": b.start_equity, "realized": b.realized, "blocked": b.blocked,
-               "trades_today": b.trades, "brief": self.brief, "playbook": self.memory.playbook_text(), "cfg": self.cfg}
+               "trades_today": b.trades, "brief": self.brief, "playbook": self.memory.playbook_text(),
+               "mgmt": self.memory.mgmt_text(), "cfg": self.cfg}
         answer, latency = self._ask(f"check-in {clock.hhmm(now)}", self.brain.checkin, ctx, now)
         row = {"t": now, "answer": answer, "latency_s": latency}
         self.checkins.append(row)
@@ -344,13 +392,84 @@ class DaySession:
 
     # ------------------------------------------------------------ after the close
 
+    def _sync_plans(self):
+        """Bring each plan's status up to date with its order and trade."""
+        b = self.broker
+        orders = {o["id"]: o for o in b.orders}
+        trades = {}
+        for t in b.trades:
+            trades.setdefault(t["plan_id"], []).append(t)
+        for p in self.plans:
+            o = orders.get(p.get("order_id"))
+            if not o or str(p.get("status", "")).startswith("rejected"):
+                continue
+            t = (trades.get(p["id"]) or [None])[0]
+            if t:
+                p["result_r"] = t["r"]
+                p["status"] = (f"filled {clock.hhmm(t['entry_ts'])} @ {t['entry']:.2f}, {t['exit_reason']} "
+                               f"{clock.hhmm(t['exit_ts'])} @ {t['exit']:.2f} = {t['r']:+.2f}R")
+            elif any(pos.get("plan_id") == p["id"] for pos in b.positions.values()):
+                p["status"] = "filled, position open"
+            else:
+                p["result_r"] = 0.0
+                p["status"] = o["status"] + (f": {o['reason']}" if o.get("reason") else "")
+
+    def _counterfactuals(self, view):
+        """For every plan a check-in changed: what the plan, left alone, would have made."""
+        rows = []
+        for p in self.plans:
+            if not p.get("touched") or not p.get("order"):
+                continue
+            _, reg = self._bars(view, p["ticker"])
+            alone = replay.simulate(p["order"], reg, self.cfg, self.flatten_ts)
+            alone_r = (alone or {}).get("r") or 0.0
+            actual = p.get("result_r") or 0.0
+            action = min((x["action"] for x in p["touched"]), key=lambda a: _ACTION_RANK.get(a, 9))
+            p["untouched"] = (f"left alone it would have made {alone_r:+.2f}R ({alone['exit_reason']})" if alone
+                              else "left alone it would not have filled (0R)")
+            rows.append({"day": self.day, "ticker": p["ticker"], "plan": p["id"], "action": action,
+                         "actual_r": round(actual, 2), "untouched_r": round(alone_r, 2),
+                         "delta_r": round(actual - alone_r, 2)})
+        return rows
+
+    def _base_rates(self, view):
+        """Mechanical setups replayed on the scanner's top names (and today's focus) over today's bars."""
+        n = self.cfg["baserate_names"]
+        if not n:
+            return []
+        rows = self.scan[:n] + [r for r in self.scan[n:] if r["ticker"] in self.focus]
+        return replay.base_rates(self.day, rows, lambda tk: self._bars(view, tk)[1], self.cfg, self.interval_s,
+                                 self.flatten_ts)
+
+    def _track_row(self, t):
+        risk = abs(t["entry"] - t["initial_stop"]) or None
+        return {"day": self.day, "ticker": t["ticker"], "side": t["side"], "setup": str(t.get("setup") or "")[:60],
+                "r": t["r"], "pnl": t["pnl"], "entry": clock.hhmm(t["entry_ts"]), "exit_reason": t["exit_reason"],
+                "mfe_r": round(t["mfe"] / risk, 2) if risk else None,
+                "mae_r": round(t["mae"] / risk, 2) if risk else None,
+                "origin": "checkin" if "-checkin-" in str(t.get("plan_id") or "") else "premarket",
+                "confidence": t.get("confidence"), "rules": t.get("rules") or []}
+
+    def _record_evidence(self, view):
+        """Once per day, even if the reflection is retried: settle plans, price interventions, replay base
+        rates, and (when this trader learns) add them all to memory."""
+        if self._recorded:
+            return
+        self._recorded = True
+        self._sync_plans()
+        self.mgmt = self._counterfactuals(view)
+        self.base = self._base_rates(view)
+        if self.cfg["learn"] and self.brain.learns:
+            for t in self.broker.trades:
+                self.memory.record_trade(t)
+                self.memory.record_track(self._track_row(t))
+            self.memory.record_mgmt(self.mgmt)
+            self.memory.record_base_rates(self.base)
+
     def reflect(self, now, learn=True):
         view = self.data.view(now)
         b = self.broker
-        if not self._recorded:  # once per day, even if reflect is retried after a failed model call
-            self._recorded = True
-            for t in b.trades:
-                self.memory.record_trade(t)
+        self._record_evidence(view)
         day_moves = []
         for r in self.scan[:12]:
             tk = r["ticker"]
@@ -365,9 +484,15 @@ class DaySession:
         result = {"day": self.day, "pnl": round(b.realized, 2), "trades": len(b.trades),
                   "start_equity": b.start_equity, "end_equity": round(b.start_equity + b.realized, 2)}
         changes = []
-        if learn and self.brain.learns:
+        if learn and self.cfg["learn"] and self.brain.learns:
+            base_today = {}
+            for x in self.base:
+                base_today.setdefault(x["ticker"], []).append(f"{x['setup']} {x['side']} {x['r']:+.1f}R")
             ctx = {"day": self.day, "now": now, "brief": self.brief, "plans": self.plans, "trades": b.trades,
                    "events": b.events[-60:], "checkins": self.checkins, "day_moves": day_moves, "result": result,
+                   "mgmt_today": self.mgmt, "base_today": base_today,
+                   "track": self.memory.track_text(), "mgmt": self.memory.mgmt_text(),
+                   "base_rates": self.memory.base_rates_text(),
                    "rules": self.memory.active_rules(), "playbook": self.memory.playbook_text(),
                    "retired": [r for r in self.memory.rules if r["status"] == "retired"],
                    "recent_days": self.memory.journal()[-5:], "cfg": self.cfg}
@@ -382,8 +507,10 @@ class DaySession:
         self.memory.save()
         row = {**result, "focus": self.focus, "market_view": (self.brief or {}).get("market_view", ""),
                "summary": (self.reflection or {}).get("summary", ""), "plans": len(self.plans),
-               "rule_changes": changes, "playbook_version": self.memory.state["version"], "calls": self.calls}
-        self.memory.write_journal(row)
+               "rule_changes": changes, "playbook_version": self.memory.state["version"], "calls": self.calls,
+               "mgmt": self.mgmt, "base_rates": [{k: x[k] for k in ("ticker", "setup", "side", "r", "gap")}
+                                                 for x in self.base]}
+        self.memory.write_journal({k: v for k, v in row.items() if k != "base_rates"})
         return row
 
     def _learn(self, ans):
@@ -392,8 +519,9 @@ class DaySession:
         for les in (ans.get("lessons") or [])[:5]:
             tks = [str(t).upper() for t in les.get("tickers") or []]
             fp = list(self.market_fp) + [tok for t in tks for tok in self.fps.get(t) or scan_fp.get(t) or []]
-            if m.add_lesson(les.get("text", ""), day, les.get("tags") or [], tks, les.get("importance", 5), fp):
-                changes.append("lesson")
+            lesson = m.add_lesson(les.get("text", ""), day, les.get("tags") or [], tks, les.get("importance", 5), fp)
+            if lesson:
+                changes.append("lesson" if lesson["day"] == day else f"reinforced {lesson['id']}")
         for fb in ans.get("rule_feedback") or []:
             m.apply_feedback(str(fb.get("rule_id", "")), fb.get("verdict"))
         for ed in (ans.get("edit_rules") or [])[:3]:
@@ -404,17 +532,25 @@ class DaySession:
             # A reflection may retire an untested idea, but proven rules only go on the evidence.
             if r and not (r["uses"] >= 3 and r["sum_r"] > 0) and m.retire_rule(r["id"], day, rt.get("why", "")):
                 changes.append(f"retired {r['id']}")
-        for nr in (ans.get("new_rules") or [])[:3]:
-            rule = m.add_rule(nr.get("text", ""), nr.get("tags") or [], day)
+        for nr in (ans.get("new_rules") or [])[:2]:
+            text = " ".join(str(nr.get("text", "")).split())
+            twin, how = m.similar_rule(text) if text else (None, None)
+            if twin and how != "dormant":
+                changes.append(f"dropped a rule that repeats {twin['id']}")
+                continue
+            rule = m.add_rule(text, nr.get("tags") or [], day)
             if rule:
-                changes.append(f"added {rule['id']}")
+                changes.append(f"{'added' if rule['created'] == day else 'revived'} {rule['id']}")
+            elif text:
+                changes.append("no room for another trial rule")
         return changes
 
     def _curate(self, now):
         """Weekly consolidation through small delta operations, never a full rewrite."""
         m = self.memory
         ctx = {"day": self.day, "rules": m.active_rules(True), "journal": m.journal()[-10:], "cfg": self.cfg,
-               "retired": [r for r in m.rules if r["status"] == "retired"]}
+               "retired": [r for r in m.rules if r["status"] == "retired"], "track": m.track_text(),
+               "mgmt": m.mgmt_text(), "base_rates": m.base_rates_text()}
         ans, _ = self._ask("curation", self.brain.curate, ctx, now)
         if not ans:
             return []
@@ -426,7 +562,7 @@ class DaySession:
             budget[kind] -= 1
             if kind == "add":
                 r = m.add_rule(op.get("text", ""), op.get("tags") or [], self.day, source="curator")
-                changes += [f"added {r['id']}"] if r else []
+                changes += [f"{'added' if r['created'] == self.day else 'revived'} {r['id']}"] if r else []
             elif kind == "edit" and ids and m.edit_rule(ids[0], op.get("text", ""), self.day, op.get("why", "")):
                 changes.append(f"edited {ids[0]}")
             elif kind == "merge":

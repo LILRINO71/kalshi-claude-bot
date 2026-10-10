@@ -5,8 +5,6 @@ import threading
 import time
 from pathlib import Path
 
-from kalshibot import storage as _kalshi_storage
-
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data" / "daytrader"
 CACHE = DATA / "cache"
@@ -15,7 +13,7 @@ PROFILES = DATA / "profiles"
 LIVE = DATA / "live"
 SETTINGS_FILE = DATA / "settings.json"
 LLM_CACHE = CACHE / "llm.jsonl"
-USAGE_FILE = _kalshi_storage.USAGE_FILE  # shared with the Kalshi desk so its Usage tab sees every call
+USAGE_FILE = DATA / "usage.jsonl"  # one row per Claude call: tokens, latency, errors
 
 _lock = threading.Lock()
 

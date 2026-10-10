@@ -112,8 +112,10 @@ REFLECT_SCHEMA = {
         "rule_feedback": {"type": "array", "items": {"type": "object", "properties": {
             "rule_id": _STR, "verdict": {"type": "string", "enum": ["helpful", "harmful", "neutral"]}, "why": _STR},
             "required": ["rule_id", "verdict", "why"]}},
-        "new_rules": {"type": "array", "description": "at most 3", "items": {"type": "object", "properties": {
-            "text": _STR, "tags": _TAGS, "why": _STR}, "required": ["text", "tags", "why"]}},
+        "new_rules": {"type": "array", "description": "at most 2", "items": {"type": "object", "properties": {
+            "text": _STR, "tags": _TAGS, "why": _STR,
+            "evidence": {"type": "string", "description": "the trades, plans, interventions or base rates behind it"}},
+            "required": ["text", "tags", "why", "evidence"]}},
         "edit_rules": {"type": "array", "description": "at most 3", "items": {"type": "object", "properties": {
             "rule_id": _STR, "text": _STR, "why": _STR}, "required": ["rule_id", "text", "why"]}},
         "retire_rules": {"type": "array", "description": "at most 3", "items": {"type": "object", "properties": {
@@ -196,6 +198,18 @@ def _notes(cfg):
     return f"\nNOTES FROM YOUR OPERATOR\n{cfg['instructions'].strip()}\n" if cfg.get("instructions", "").strip() else ""
 
 
+def _evidence(ctx, track=True, base=True, mgmt=False):
+    """The desk's code-kept ledgers: facts about your own results and your environment, not opinions."""
+    parts = []
+    if track and ctx.get("track"):
+        parts.append(f"YOUR TRACK RECORD (computed by the desk from your closed trades)\n{ctx['track']}")
+    if mgmt and ctx.get("mgmt"):
+        parts.append(f"YOUR CHECK-IN INTERVENTIONS, PRICED (each change you made vs the same plan left alone)\n{ctx['mgmt']}")
+    if base and ctx.get("base_rates"):
+        parts.append(f"BASE RATES: SIMPLE MECHANICAL SETUPS ON RECENT SCANNER NAMES\n{ctx['base_rates']}")
+    return "\n\n".join(parts)
+
+
 # ---------------------------------------------------------------- steps
 
 def morning(ctx):
@@ -224,6 +238,8 @@ RELEVANT LESSONS FROM YOUR MEMORY
 YOUR LAST SESSIONS
 {_recent(ctx['recent_days'])}
 
+{_evidence(ctx)}
+
 MARKET CONTEXT
 {ctxt or '(no index data)'}
 
@@ -243,25 +259,30 @@ TASK
 Choose up to {ctx['focus_max']} stocks to focus on today. Fewer is fine, and zero is right on a day with nothing
 worth trading. For each: why it is in play, the catalyst, your directional bias, and the playbook rules behind the
 pick. You can pick a stock that is not on the scanner if the news gives a reason. Also write your read of today's
-market regime. You will get each stock's details and its own news next, and then write the actual trade plans."""
+market regime. Let the track record and base rates weigh on you: lean toward the kinds of trades that have been
+paying in this environment and away from the ones that have been losing, unless today's evidence clearly says
+otherwise. You will get each stock's details and its own news next, and then write the actual trade plans."""
 
 
 def research(ctx):
     from .memory import Memory
     cfg = ctx["cfg"]
     blocks = []
+    stock_base = ctx.get("stock_base_rates") or {}
     for r in ctx["research"]:
         d, pm, f = r["daily"], r["pm"] or {}, r["focus"]
         if not d:
             blocks.append(f"### {r['ticker']}: no daily data")
             continue
         pmb = ", ".join(f"{clock.hhmm(b[0])} o{fmt(b[1])} h{fmt(b[2])} l{fmt(b[3])} c{fmt(b[4])}" for b in r["pm_bars"])
+        mech = "; ".join(stock_base.get(r["ticker"]) or []) or "none recorded"
         blocks.append(f"""### {r['ticker']} ({r['name']}, {r['sector']}): your morning note: {f.get('bias')} | {f.get('why')} | catalyst: {f.get('catalyst')}
 Previous session {d['prev_day']}: open {fmt(d['prev_open'])} high {fmt(d['prev_high'])} low {fmt(d['prev_low'])} close {fmt(d['prev_close'])}, volume {fmt(float(d['prev_volume'] or 0), 0)} (20d avg {fmt(d['avg_volume'], 0)})
 ATR(14) {fmt(d['atr'])} ({d['atr_pct']:.2f}%), 20-day high {fmt(d['high_20d'])} low {fmt(d['low_20d'])}; returns 1d {_pct(d['ret_1d'])} 5d {_pct(d['ret_5d'])} 20d {_pct(d['ret_20d'])}
 Last 10 daily closes: {', '.join(fmt(c) for c in d['closes_10d'])}
 Pre-market: last {fmt(pm.get('pm_last'))} ({_pct(pm.get('gap_pct'))} vs prev close), high {fmt(pm.get('pm_high'))}, low {fmt(pm.get('pm_low'))}, active in {(pm.get('pm_active') or 0) * 100:.0f}% of 5-minute bars
 Pre-market 30-minute bars: {pmb or 'none'}
+Recent mechanical setups on this stock (desk replays, newest first): {mech}
 News (newest first):
 {_news(r['news'])}
 Lessons about this stock or setup:
@@ -271,6 +292,8 @@ Lessons about this stock or setup:
 
 YOUR PLAYBOOK
 {ctx['playbook']}
+
+{_evidence(ctx, track=False)}
 
 YOUR MORNING READ: {ctx['brief'].get('market_view', '')} (regime: {ctx['brief'].get('regime', '')})
 MARKET CONTEXT
@@ -287,7 +310,9 @@ the open gaps past a stop entry by more than 1R, or past the target, the order i
 slippage and happen only after your answer arrives. Put the stop where the idea is proven wrong, and a target
 (0 for none). valid_from is 09:35 or later; valid_until is when an unfilled order is cancelled; time_exit is an
 optional HH:MM to get out regardless ("" for none); breakeven_at moves the stop to entry once price gets there
-(0 for never). size 0.25-1.0 scales the standard risk by conviction.
+(0 for never). size 0.25-1.0 scales the standard risk by conviction. A plan whose cited rules are all still on
+trial is capped at size {cfg['trial_size_cap']:g} until one of them earns promotion on results; cite an active rule only
+if the plan truly relies on it.
 
 TASK
 Do the research. For each stock, argue both sides first: the strongest bull case and the strongest bear case for
@@ -348,6 +373,8 @@ CLOSED TODAY:
 YOUR PLAYBOOK
 {ctx['playbook']}
 
+{_evidence(ctx, track=False, base=False, mgmt=True)}
+
 {chr(10).join(blocks) or '(no stocks in play)'}
 {_notes(cfg)}
 RULES OF THE DESK
@@ -357,19 +384,35 @@ TASK
 For each stock decide: hold (do nothing), adjust (new stop and/or target for an open position), cancel (pull a
 working order), exit_now (close the position at the next bar), or new_entry (a fresh plan with the same fields
 as a morning plan; it replaces any working order on that stock). Act only for a reason you can state; holding is
-the default. List only stocks you act on (an empty list means hold everything)."""
+the default. Your priced intervention record says whether your changes have been beating the plans you wrote: if a
+kind of intervention has been costing R, do less of it. List only stocks you act on (empty means hold everything)."""
+
+
+def _excursion(t):
+    risk = abs(t["entry"] - t["initial_stop"])
+    if not risk:
+        return ""
+    return f"best {t['mfe'] / risk:+.2f}R, worst {t['mae'] / risk:+.2f}R along the way"
 
 
 def reflect(ctx):
     cfg = ctx["cfg"]
     plans = "\n".join(f"- [{p.get('origin')}] {p['ticker']} {p.get('side')} {p.get('entry_type')} {fmt(p.get('entry'))} "
                       f"stop {fmt(p.get('stop'))} target {fmt(p.get('target'))} conf {fmt(p.get('confidence'))} "
-                      f"rules {', '.join(p.get('rules_used') or [])} -> {p.get('status', '')}: {p.get('thesis', '')[:220]}"
+                      f"rules {', '.join(p.get('rules_used') or [])}"
+                      + (f" (size capped {p['size_capped']})" if p.get("size_capped") else "")
+                      + f" -> {p.get('status', '')}"
+                      + (f"; touched at check-ins ({', '.join(x['action'] for x in p['touched'])}): {p['untouched']}"
+                         if p.get("touched") and p.get("untouched") else "")
+                      + f". Thesis: {p.get('thesis', '')[:200]}"
                       for p in ctx["plans"]) or "(no plans)"
     trades = "\n".join(f"- {t['ticker']} {t['side']} {t['shares']} @ {fmt(t['entry'])} -> {fmt(t['exit'])} "
-                       f"({t['exit_reason']}) {t['pnl']:+.2f}$ = {t['r']}R, best {fmt(t['mfe'])}/share, worst "
-                       f"{fmt(t['mae'])}/share, setup '{t.get('setup', '')}', rules {', '.join(t.get('rules') or []) or 'none'}"
+                       f"({t['exit_reason']}) {t['pnl']:+.2f}$ = {t['r']}R, {_excursion(t)}, "
+                       f"setup '{t.get('setup', '')}', rules {', '.join(t.get('rules') or []) or 'none'}"
                        for t in ctx["trades"]) or "(no trades)"
+    mgmt_today = "\n".join(f"- {m['ticker']} {m['action']}: actual {m['actual_r']:+.2f}R vs left alone "
+                           f"{m['untouched_r']:+.2f}R = {m['delta_r']:+.2f}R" for m in ctx.get("mgmt_today") or [])
+    base_today = "\n".join(f"- {tk}: {', '.join(v)}" for tk, v in (ctx.get("base_today") or {}).items())
     checks = "\n".join(f"- {clock.hhmm(c['t'])}: {(c['answer'] or {}).get('market_read', '(failed)')[:240]} | actions: "
                        + ", ".join(f"{a.get('ticker')} {a.get('action')}" for a in (c['answer'] or {}).get('actions', []))
                        for c in ctx["checkins"]) or "(none)"
@@ -388,7 +431,7 @@ RESULT: {res['pnl']:+,.2f}$ on {res['trades']} trades (equity {res['start_equity
 YOUR MORNING READ: {brief.get('market_view', '(no brief)')}
 YOUR FOCUS: {focus or 'none'}
 
-PLANS
+PLANS (with what became of each)
 {plans}
 
 TRADES
@@ -397,8 +440,16 @@ TRADES
 CHECK-INS
 {checks}
 
+YOUR CHECK-IN CHANGES TODAY, PRICED AGAINST THE SAME PLAN LEFT ALONE
+{mgmt_today or '(none)'}
+
 WHAT THE SCANNER'S TOP NAMES ACTUALLY DID TODAY
 {moves}
+
+MECHANICAL SETUPS ON TODAY'S SCANNER NAMES (desk replays with your fill rules; R per setup)
+{base_today or '(none filled)'}
+
+{_evidence(ctx, mgmt=True)}
 
 YOUR PLAYBOOK WITH ITS EVIDENCE SO FAR
 {rules or '(empty)'}
@@ -415,14 +466,20 @@ Review the day like a professional trader keeping a journal.
    bad luck from bad process: a well-made plan can lose and a sloppy one can win. Give each trade a verdict:
    thesis_right, thesis_wrong, execution (right idea, bad entry/stop/exit) or noise (a move under about half the
    risk, or no evidence either way). Quote the facts that support the verdict. Noise teaches nothing: no lesson.
-2. Missed: what do the day's movers say about your selection and your entries? Name what you would do differently.
+   Where a check-in changed a plan, say whether the change was worth it, using the priced comparison.
+2. Missed: what do the day's movers and today's mechanical setups say about your selection and your entries?
+   Name what you would do differently.
 3. Lessons (1-5) for your memory: specific and testable, tied to conditions you can observe in the morning or
-   intraday (not "be careful"). Importance 1-10, where 8+ means it should shape many future days.
+   intraday (not "be careful"). Importance 1-10, where 8+ means it should shape many future days. A lesson that
+   repeats one you already hold strengthens it; that is fine when today confirmed it.
 4. Rule feedback: for each rule you cited today, was it helpful, harmful or neutral today?
-5. Evolve the playbook: up to 3 new rules written as "when <observable condition>, <action>", edits that make an
-   existing rule sharper, and retirements of rules the evidence contradicts. One day is little evidence: prefer
-   a lesson for a one-off and a rule for a pattern you expect to repeat. Rules on risk can be adopted faster.
-The desk tracks every rule's real results and retires losing rules on its own."""
+5. Evolve the playbook: at most 2 new rules written as "when <observable condition>, <action>", each with the
+   evidence behind it; edits that make an existing rule sharper; retirements of rules the evidence contradicts.
+   Prefer patterns that show up in your track record or the base rates over a single day's story: one day is
+   little evidence, so use a lesson for a one-off. To refine an existing rule, edit it; a new rule that repeats an
+   existing or retired one is dropped. Rules on risk can be adopted faster.
+The desk tracks every rule's real results, retires losing rules on its own, and sizes plans that rely only on
+unproven rules down, so a new rule is cheap to try and is judged by its trades."""
 
 
 def curate(ctx):
@@ -439,9 +496,12 @@ RETIRED RULES (do not bring these back without new evidence)
 
 YOUR RECENT SESSIONS
 {_recent(ctx['journal'])}
+
+{_evidence(ctx, mgmt=True)}
 {_notes(cfg)}
 TASK
-Maintain the playbook with a few small operations; do not rewrite it wholesale. At most 3 of each:
+Maintain the playbook with a few small operations; do not rewrite it wholesale. Let the track record and base
+rates decide what stays: a rule about a kind of trade that keeps losing should be narrowed or retired. At most 3 of each:
 - merge: rules that say the same thing become one (rule_ids = the rules merged, text = the combined rule);
 - edit: sharpen a vague rule into "when <observable condition>, <action>" without changing what it means;
 - retire: a rule the evidence contradicts or that never applies (rules with 3+ trades and positive R stay);

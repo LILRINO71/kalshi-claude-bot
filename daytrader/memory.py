@@ -12,7 +12,15 @@ Design, adapted from open-source agent research (see CREDITS.md):
 - Lessons live in short- and long-term layers with FinMem-style scoring: recency decay +
   importance + BM25 relevance. Queries and lessons carry discrete "situation fingerprint" tokens
   (gap size, volume, volatility, trend, sector, market regime) so lexical retrieval finds lessons
-  from similar situations, not just similar words.
+  from similar situations, not just similar words. A lesson that says what an existing one says
+  reinforces it (more important, fresher) instead of piling up as a near-copy.
+- Numbers beat stories. Three code-kept ledgers are shown back to the model every day:
+  its track record (by side, time of day, origin, exit type, confidence, profit capture), what its
+  check-in interventions were worth against leaving each plan alone, and base rates of simple
+  mechanical setups replayed on the scanner's names after every close. A real account makes two
+  or three trades a day; the base rates add dozens of samples a day from the same fill rules.
+- Unproven ideas trade small: a plan whose cited rules are all still on trial is capped in size
+  until one of them earns promotion on its results.
 """
 import copy
 import math
@@ -31,6 +39,20 @@ RETIRE = (6, -0.15)                         # retire: 6+ trades and shrunk R bel
 OPINION_RETIRE = 4                          # untested rule judged harmful this many times more than helpful
 DORMANT_DAYS = 15                           # uncited this long: hidden from prompts until revived
 MAX_TRIAL = 8                               # trial rules allowed at once
+SIMILAR_RULE = 0.5                          # word overlap at which a proposed rule duplicates an existing one
+SIMILAR_LESSON = 0.55                       # word overlap at which a new lesson reinforces an old one
+TRACK_MAX = 400                             # trades kept in the track record
+MGMT_MAX = 300                              # check-in interventions kept
+BASE_KEEP = 60                              # trading days of base-rate samples kept
+BASE_WINDOW = 20                            # trading days of base rates shown in prompts
+
+# Mechanical setups the desk replays on the scanner's names after each close (see replay.py).
+SETUP_NAMES = {
+    "orb_with_gap": "opening-range (first 15 min) breakout in the gap's direction",
+    "orb_against_gap": "opening-range breakout against the gap (a fade)",
+    "pm_break": "break of the pre-market high (gap up) or low (gap down)",
+    "trend_1030": "10:30 entry with the move since the open, held to the close",
+}
 
 SEED_RULES = [
     ("When a stock has no fresh, specific catalyst (earnings, guidance, analyst action, deal, FDA, sector news) "
@@ -79,6 +101,37 @@ def shrunk_r(rule):
     return rule["sum_r"] / (rule["uses"] + SHRINK)
 
 
+def similarity(a, b):
+    """How much of the shorter text the longer one already says (overlap of content words), 0-1.
+    Paraphrased rewrites of a rule score about 0.5+; distinct lessons on one theme stay under ~0.35."""
+    x, y = set(tokens(a)), set(tokens(b))
+    if not x or not y:
+        return 0.0
+    if min(len(x), len(y)) < 6:  # too short for containment to mean anything
+        return len(x & y) / len(x | y)
+    return len(x & y) / min(len(x), len(y))
+
+
+def _stats(rows):
+    rs = [t["r"] for t in rows if t.get("r") is not None]
+    if not rs:
+        return None
+    return len(rs), sum(rs) / len(rs), sum(1 for r in rs if r > 0) / len(rs), sum(rs)
+
+
+def _line(label, rows):
+    s = _stats(rows)
+    if not s:
+        return None
+    n, avg, win, total = s
+    return f"{label} {n}: {avg:+.2f}R avg, {win * 100:.0f}% won, {total:+.1f}R total"
+
+
+def gap_bucket(gap_pct):
+    g = abs(gap_pct or 0)
+    return "gap 3%+" if g >= 3 else "gap 1-3%" if g >= 1 else "gap <1%"
+
+
 class Memory:
     """Everything one trader profile has learned. State is a few files in one folder."""
 
@@ -93,6 +146,8 @@ class Memory:
                     self.add_rule(text, tags, day="seed", source="seed", status="active")
         else:
             self.state = state
+        for key in ("track", "base", "mgmt"):  # ledgers added after the first profiles were saved
+            self.state.setdefault(key, [])
 
     # ------------------------------------------------------------ persistence
 
@@ -128,13 +183,30 @@ class Memory:
     def rule(self, rid):
         return next((r for r in self.rules if r["id"] == rid), None)
 
-    def add_rule(self, text, tags=(), day="", source="reflection", status="trial"):
+    def similar_rule(self, text):
+        """An existing rule that already says this: a live one, a dormant one, or one retired for losing.
+        Returns (rule, how) or (None, None)."""
+        best, score = None, 0.0
+        for r in self.rules:
+            if r["status"] == "retired" and not str(r.get("retired_why", "")).startswith(("losing", "untested")):
+                continue  # merged or capped rules aren't a verdict on the idea
+            s = 1.0 if r["text"].lower() == text.lower() else similarity(text, r["text"])
+            if s > score:
+                best, score = r, s
+        if best and score >= SIMILAR_RULE:
+            return best, best["status"]
+        return None, None
+
+    def add_rule(self, text, tags=(), day="", source="reflection", status="trial", dedupe=True):
         text = " ".join(str(text).split())[:400]
-        if not text or any(r["text"].lower() == text.lower() for r in self.active_rules()):
+        if not text:
             return None
-        dormant = next((r for r in self.rules if r["status"] == "dormant" and r["text"].lower() == text.lower()), None)
-        if dormant:  # the same idea again: wake the old rule up, with its evidence
-            return self.revive_rule(dormant["id"], day, "proposed again")
+        if dedupe:
+            twin, how = self.similar_rule(text)
+            if how == "dormant":  # the same idea again: wake the old rule up, with its evidence
+                return self.revive_rule(twin["id"], day, "proposed again")
+            if twin:
+                return None
         if status == "trial" and sum(r["status"] == "trial" for r in self.rules) >= MAX_TRIAL:
             return None
         rid = f"R{self.state['next_rule']}"
@@ -183,7 +255,7 @@ class Memory:
         if len(olds) < 2:
             return None
         new = self.add_rule(text, tags, day, source="merge", status="active" if any(
-            r["status"] == "active" for r in olds) else "trial")
+            r["status"] == "active" for r in olds) else "trial", dedupe=False)
         if not new:
             return None
         for k in ("uses", "wins", "losses", "sum_r", "sum_r2", "helpful", "harmful"):
@@ -221,6 +293,106 @@ class Memory:
         r = self.rule(rid)
         if r and verdict in ("helpful", "harmful"):
             r[verdict] += 1
+
+    def size_cap(self, rule_ids, trial_cap):
+        """Largest size a plan may take: full size only when it relies on at least one active (proven or
+        seeded) rule; ideas resting only on trial rules are tested small."""
+        rules = [self.rule(i) for i in rule_ids or []]
+        if any(r and r["status"] == "active" for r in rules):
+            return 1.0
+        return trial_cap
+
+    # ------------------------------------------------------------ ledgers
+
+    def record_track(self, row):
+        """One closed trade, compactly, for the track record."""
+        self.state["track"] = (self.state["track"] + [row])[-TRACK_MAX:]
+
+    def record_mgmt(self, rows):
+        self.state["mgmt"] = (self.state["mgmt"] + list(rows))[-MGMT_MAX:]
+
+    def record_base_rates(self, rows):
+        keep = [b for b in self.state["base"] if self.day_index - b["di"] < BASE_KEEP]
+        self.state["base"] = keep + [{**b, "di": self.day_index} for b in rows]
+
+    def track_text(self, n=60):
+        tr = self.state["track"][-n:]
+        if not tr:
+            return "(no trades yet)"
+        out = [f"Your last {len(tr)} trades over {len({t['day'] for t in tr})} sessions. " + (_line("All", tr) or "")]
+        out.append(" | ".join(filter(None, [_line("Long", [t for t in tr if t["side"] == "long"]),
+                                            _line("Short", [t for t in tr if t["side"] == "short"])])))
+        by_time = [("Entered 09:30-09:59", "09:30", "10:00"), ("10:00-11:29", "10:00", "11:30"),
+                   ("11:30-close", "11:30", "16:01")]
+        out.append(" | ".join(filter(None, [_line(lab, [t for t in tr if a <= t.get("entry", "") < b])
+                                            for lab, a, b in by_time])))
+        out.append(" | ".join(filter(None, [_line("Pre-market plans", [t for t in tr if t.get("origin") != "checkin"]),
+                                            _line("Check-in entries", [t for t in tr if t.get("origin") == "checkin"])])))
+        kinds = {"Stopped out": ("stop",), "Hit target": ("target",), "Time/close exit": ("time", "end of day"),
+                 "Your early exits": ("manual",)}
+        out.append(" | ".join(filter(None, [_line(lab, [t for t in tr if str(t.get("exit_reason", "")).startswith(ks)])
+                                            for lab, ks in kinds.items()])))
+        conf = [t for t in tr if isinstance(t.get("confidence"), (int, float))]
+        out.append(" | ".join(filter(None, [_line("Confidence >= 0.55", [t for t in conf if t["confidence"] >= 0.55]),
+                                            _line("Confidence < 0.55", [t for t in conf if t["confidence"] < 0.55])])))
+        mfe = [t["mfe_r"] for t in tr if t.get("mfe_r") is not None]
+        rs = [t["r"] for t in tr if t.get("r") is not None]
+        if mfe and rs:
+            reached = sum(1 for t in tr if (t.get("mfe_r") or 0) >= 1)
+            out.append(f"Profit capture: best open profit averaged {sum(mfe) / len(mfe):+.2f}R but trades finished at "
+                       f"{sum(rs) / len(rs):+.2f}R; {reached} of {len(tr)} trades were up 1R or more at some point.")
+        return "\n".join(x for x in out if x)
+
+    def mgmt_text(self):
+        rows = self.state["mgmt"]
+        if not rows:
+            return "(no interventions measured yet)"
+        names = {"exit": "Early exits", "adjust": "Stop/target changes", "cancel": "Cancelled orders",
+                 "replace": "Orders replaced by a new plan"}
+        out = []
+        for key, label in names.items():
+            g = [m["delta_r"] for m in rows if m["action"] == key]
+            if g:
+                total = sum(g)
+                out.append(f"{label} {len(g)}x: {total:+.1f}R vs leaving the plan alone "
+                           f"({sum(1 for d in g if d > 0)} helped, {sum(1 for d in g if d < 0)} hurt)")
+        return " | ".join(out) + " (positive = your intervention beat the untouched plan)"
+
+    def base_rates_text(self, window=BASE_WINDOW):
+        rows = [b for b in self.state["base"] if self.day_index - b["di"] <= window]
+        if not rows:
+            return "(none yet: base rates build up after each session)"
+        days = len({b["day"] for b in rows})
+        recent = self.day_index - 5
+        out = [f"Last {days} session{'s' if days != 1 else ''}, code-simulated on the scanner's top names with your "
+               f"fill rules (stop wins ties, slippage, no target on the entry bar). R per trade:"]
+        for key, label in SETUP_NAMES.items():
+            g = [b for b in rows if b["setup"] == key]
+            s = _stats(g)
+            if not s:
+                continue
+            n, avg, win, _ = s
+            last = _stats([b for b in g if b["di"] > recent])
+            parts = [f"- {label}: {n} trades, {avg:+.2f}R avg, {win * 100:.0f}% won"
+                     + (f"; last 5 sessions {last[1]:+.2f}R (n={last[0]})" if last else "")]
+            by_gap = []
+            for bucket in ("gap <1%", "gap 1-3%", "gap 3%+"):
+                gs = _stats([b for b in g if b.get("gap") == bucket])
+                if gs and gs[0] >= 5:
+                    by_gap.append(f"{bucket} {gs[1]:+.2f}R (n={gs[0]})")
+            if by_gap:
+                parts.append("  by gap size: " + ", ".join(by_gap))
+            out.append("\n".join(parts))
+        return "\n".join(out)
+
+    def base_rates_for(self, tickers, window=BASE_WINDOW):
+        """Recent base-rate results on specific stocks, newest first, for research."""
+        want = set(tickers)
+        rows = [b for b in self.state["base"] if b["ticker"] in want and self.day_index - b["di"] <= window]
+        out = {}
+        for b in sorted(rows, key=lambda b: -b["di"]):
+            out.setdefault(b["ticker"], []).append(f"{b['day']} {b['setup']} {b['r']:+.1f}R")
+        return {tk: v[:6] for tk, v in out.items()}
 
     def evolve(self, day, max_rules):
         """Evidence-based lifecycle: promote, demote, retire, hide stale rules, enforce the size cap."""
@@ -273,10 +445,25 @@ class Memory:
         return self.state["lessons"]
 
     def add_lesson(self, text, day, tags=(), tickers=(), importance=5, fingerprint=()):
+        """Store a lesson, or reinforce the existing lesson that already says it. Returns the lesson;
+        a reinforced one keeps its original `day` and gets `reinforced_on` = this day."""
         text = " ".join(str(text).split())[:500]
         if not text:
             return None
-        importance = int(min(10, max(1, int(importance or 5))))
+        try:
+            importance = int(min(10, max(1, int(importance or 5))))
+        except (TypeError, ValueError):
+            importance = 5
+        twin = max(self.lessons, key=lambda l: similarity(text, l["text"]), default=None)
+        if twin and similarity(text, twin["text"]) >= SIMILAR_LESSON:
+            twin["importance"] = min(10, max(twin["importance"], importance) + 1)
+            twin["day_index"], twin["reinforced_on"] = self.day_index, day
+            twin["reinforced"] = twin.get("reinforced", 0) + 1
+            twin["fp"] = list(dict.fromkeys(twin.get("fp", []) + list(fingerprint)))[:24]
+            twin["tickers"] = list(dict.fromkeys(twin["tickers"] + [str(t).upper() for t in tickers]))[:6]
+            if twin["importance"] >= PROMOTE_IMPORTANCE:
+                twin["layer"] = "long"
+            return twin
         lid = f"L{self.state['next_lesson']}"
         self.state["next_lesson"] += 1
         lesson = {"id": lid, "text": text, "day": day, "day_index": self.day_index,

@@ -47,6 +47,10 @@ def _cls(v):
     return "pos" if v and v > 0 else "neg" if v and v < 0 else ""
 
 
+def _r(v):
+    return "—" if v is None else f"{v:+.2f}R"
+
+
 def _tile(label, value, sub="", cls=""):
     return f'<div class="tile"><div class="l">{_e(label)}</div><div class="v {cls}">{value}</div><div class="s">{_e(sub)}</div></div>'
 
@@ -66,8 +70,9 @@ def render(state, rules, history):
         _tile("Win rate", _pct((s.get("win_rate") or 0) * 100 if s.get("win_rate") is not None else None, 0, False),
               "95% CI " + ("—" if not s.get("win_rate_ci") or s["win_rate_ci"][0] is None else
                            f"{s['win_rate_ci'][0] * 100:.0f}–{s['win_rate_ci'][1] * 100:.0f}%")),
-        _tile("Average R", "—" if s.get("avg_r") is None else f"{s['avg_r']:+.2f}R", f"total {s.get('total_r', 0):+.1f}R",
-              _cls(s.get("avg_r"))),
+        _tile("Average R", "—" if s.get("avg_r") is None else f"{s['avg_r']:+.2f}R",
+              ("95% CI " + f"{s['avg_r_ci'][0]:+.2f} to {s['avg_r_ci'][1]:+.2f}R" if (s.get("avg_r_ci") or [None])[0] is not None
+               else f"total {s.get('total_r', 0):+.1f}R"), _cls(s.get("avg_r"))),
         _tile("Profit factor", "—" if not s.get("profit_factor") else f"{s['profit_factor']:.2f}", "gross wins / gross losses"),
         _tile("Max drawdown", _money(s.get("max_drawdown")), _pct(s.get("max_drawdown_pct"), 1, False) + " of peak"),
         _tile("Sharpe (daily, annualized)", "—" if s.get("sharpe_daily_annualized") is None else
@@ -112,6 +117,23 @@ def render(state, rules, history):
                            f"<p><b>Review:</b> {_e(refl.get('process_review'))}</p><p><b>Missed:</b> {_e(refl.get('missed'))}</p>"
                            f"<p><b>Lessons:</b> {_e('; '.join(x.get('text', '') for x in refl.get('lessons') or []))}</p>"
                            f"<p class='muted'>{_e(' | '.join(e['msg'] for e in (d.get('events') or [])[:40]))}</p></div></details>")
+    lc_rows = [f"<tr><td>{_e(b['start'])} → {_e(b['end'])}</td><td class='n'>{b['trades']}</td>"
+               f"<td class='n {_cls(b['avg_r'])}'>{_r(b['avg_r'])}</td>"
+               f"<td class='n {_cls(b['pnl'])}'>{_money(b['pnl'], True)}</td></tr>" for b in s.get("learning_curve") or []]
+    mg_names = {"exit": "Early exits", "adjust": "Stop/target changes", "cancel": "Cancelled orders",
+                "replace": "Orders replaced by a new plan"}
+    mg_rows = [f"<tr><td>{_e(mg_names.get(k, k))}</td><td class='n'>{v['n']}</td>"
+               f"<td class='n {_cls(v['delta_r'])}'>{v['delta_r']:+.2f}R</td></tr>" for k, v in (s.get("management") or {}).items()]
+    br_rows = [f"<tr><td>{_e(k)}</td><td class='n'>{v['n']}</td><td class='n {_cls(v['avg_r'])}'>{v['avg_r']:+.2f}R</td>"
+               f"<td class='n'>{v['win_rate'] * 100:.0f}%</td></tr>" for k, v in (s.get("base_rates") or {}).items()]
+    mk = s.get("market") or {}
+    market = (f"{mk['days']} days: {mk.get('calm', 0)} calm, {mk.get('normal', 0)} normal, {mk.get('volatile', 0)} volatile. "
+              f"Average VIX {mk['vix']:.1f}, SPY day range {mk['spy_range']:.2f}%, "
+              f"{mk['movers']:.1f}% of the universe moving 5%+ a day." if mk and mk.get("vix") is not None else "")
+    rg_rows = [f"<tr><td>{_e(k)}</td><td class='n'>{v['days']}</td><td class='n'>{v['trades']}</td>"
+               f"<td class='n {_cls(v['avg_r'])}'>{_r(v['avg_r'])}</td><td class='n {_cls(v['day_pnl'])}'>{_money(v['day_pnl'], True)}</td>"
+               f"<td class='n {_cls(v['base_avg_r'])}'>{_r(v['base_avg_r'])}</td></tr>"
+               for k, v in (s.get("by_regime") or {}).items()]
     curve = [{"x": t * 1000, "y": round(v, 2)} for t, v in state["equity_curve"]]
     title = state.get("name") or f"{engine}, {state['start']} to {state['end']}"
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -124,6 +146,21 @@ def render(state, rules, history):
 {leak}<div class="verdict">{_e(s.get('verdict', ''))}</div>
 <div class="tiles">{''.join(tiles)}</div>
 <h2>Equity</h2><div class="card"><div class="chart"><canvas id="eq"></canvas></div></div>
+<h2>Calm vs volatile days</h2><div class="card"><p class="muted">{_e(market) or 'No market data.'} A day is volatile
+when VIX is 20+, SPY's range is 1.3%+ or 15%+ of the universe moves 5%+; calm when all three are low.</p><table><thead><tr>
+<th>Market</th><th class="n">Days</th><th class="n">Trades</th><th class="n">Avg R</th><th class="n">PnL</th>
+<th class="n">Mechanical setups avg R</th></tr></thead><tbody>{''.join(rg_rows) or '<tr><td colspan=6>none</td></tr>'}</tbody></table></div>
+<h2>Is it learning?</h2><div class="card"><p class="muted">Average R per block of five trading days. A learning trader
+should trend up; flat or falling means the playbook changes aren't paying yet.</p><table><thead><tr><th>Days</th>
+<th class="n">Trades</th><th class="n">Avg R</th><th class="n">PnL</th></tr></thead>
+<tbody>{''.join(lc_rows) or '<tr><td colspan=4>no days</td></tr>'}</tbody></table></div>
+<h2>Check-in interventions, priced</h2><div class="card"><p class="muted">Each change made at a check-in against the
+same plan left alone. Positive means the intervention helped.</p><table><thead><tr><th>Kind</th><th class="n">Times</th>
+<th class="n">Net effect</th></tr></thead><tbody>{''.join(mg_rows) or '<tr><td colspan=3>no interventions</td></tr>'}</tbody></table></div>
+<h2>Base rates: mechanical setups on the scanner's names</h2><div class="card"><p class="muted">Code-simulated with the
+same fill rules, over the same days. These show what the environment rewarded, independent of the trader's choices.</p>
+<table><thead><tr><th>Setup</th><th class="n">Trades</th><th class="n">Avg R</th><th class="n">Won</th></tr></thead>
+<tbody>{''.join(br_rows) or '<tr><td colspan=4>none</td></tr>'}</tbody></table></div>
 <h2>Days</h2><div class="card"><table><thead><tr><th>Day</th><th class="n">PnL</th><th class="n">Trades</th><th>Focus</th>
 <th>Journal</th><th>Playbook changes</th></tr></thead><tbody>{''.join(days_rows) or '<tr><td colspan=6>none</td></tr>'}</tbody></table></div>
 <h2>Trades</h2><div class="card"><table><thead><tr><th>Entry</th><th>Stock</th><th>Side</th><th class="n">Shares</th>

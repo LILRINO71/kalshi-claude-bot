@@ -41,6 +41,34 @@ def plan_days(data, start, end):
     return [d for d in days if d < clock.today_et() or clock.now_ts() > clock.at(d, "16:10")]
 
 
+def warm_up_base_rates(memory, data, cfg, before, n_days=15, log=print):
+    """A fresh trader's first briefs would have no base rates. Replay the mechanical setups on the trading
+    days just before `before` (code only, bars only, nothing from `before` on) and file them as history,
+    so its first morning already knows what the market has been rewarding. Returns samples added."""
+    if memory.state["base"] or not n_days or not cfg["baserate_names"]:
+        return 0
+    days = [d for d in data.trading_days(clock.prev_weekday(before, n_days * 2), before) if d < before][-n_days:]
+    if not days:
+        return 0
+    data.prefetch(cfg["universe"] or None, days, log=lambda *_: None)
+    flat, added = brains.FlatBrain(cfg), 0
+    for i, day in enumerate(days):
+        try:
+            s = DaySession(day, cfg, data, flat, memory, cfg["bankroll"], log=lambda *_: None)
+            _, stocks = s.scan_market(clock.at(day, cfg["premarket_time"]), news=False)
+            s.scan = stocks[:cfg["scan_top"]]
+            rows = s._base_rates(data.view(clock.at(day, "16:05")))
+        except Exception as e:  # a day with odd data just contributes nothing
+            log(f"Warm-up skipped {day}: {e!r}")
+            continue
+        di = memory.day_index - (len(days) - i)  # earlier than any day this trader has lived
+        memory.state["base"].extend({**b, "di": di} for b in rows)
+        added += len(rows)
+    if added:
+        log(f"Warmed up base rates from {len(days)} earlier sessions ({added} replayed setups, no Claude calls)")
+    return added
+
+
 def run(cfg, start, end, name="", profile=None, save_profile=None, allow_leaky=False, resume=None,
         max_days=None, log=print, should_stop=None, on_start=None):
     """Simulate each trading day in [start, end]. `should_stop()` is checked between days;
@@ -91,6 +119,9 @@ def run(cfg, start, end, name="", profile=None, save_profile=None, allow_leaky=F
         log("Nothing to do (no trading days with data in that range).")
     universe = cfg["universe"] or None
     data.prefetch(universe, todo, log=log)
+    if todo and not resume and cfg["learn"] and brain.learns:
+        warm_up_base_rates(memory, data, cfg, todo[0], log=log)
+        memory.save()
 
     equity = state["days"][-1]["end_equity"] if state["days"] else cfg["bankroll"]
     if not state["equity_curve"]:

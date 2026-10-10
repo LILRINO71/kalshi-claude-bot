@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Day Trader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">AI</span>
+    <div>
+      <div class="brand-name">AI Day Trader</div>
+      <div class="brand-sub">Paper trading · US stocks · Claude learns from every session</div>
+    </div>
+  </div>
+  <div class="engine">
+    <label class="field compact">
+      <span>Model</span>
+      <select id="q-model"></select>
+    </label>
+    <div class="field compact">
+      <span>Effort</span>
+      <div class="seg" id="q-effort"></div>
+    </div>
+  </div>
+  <div class="pills">
+    <span class="pill" id="pill-live"><i class="dot"></i><span>Live account</span></span>
+    <span class="pill" id="pill-usage">— calls today</span>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="backtest" role="tab">Backtests</button>
+  <button class="tab" data-tab="live" role="tab">Live account</button>
+  <button class="tab" data-tab="usage" role="tab">Usage</button>
+  <button class="tab" data-tab="settings" role="tab">Settings</button>
+</nav>
+
+<main>
+<!-- ============================== BACKTESTS ============================== -->
+<section id="tab-backtest" class="tab-panel active">
+  <div class="grid-2 wide-left">
+    <div class="card">
+      <h2>Run a backtest</h2>
+      <p class="small muted">The trader lives through each past day in order: morning brief, research, plans, check-ins, the close, then a review that rewrites its playbook before the next day. It only ever sees what was known at that moment. Claude runs use the model and effort from the top bar: about 7 calls per day, roughly 1–2 minutes a day with Sonnet 5.5 (longer with Opus or higher effort).</p>
+      <div class="form-grid">
+        <label class="field"><span>From</span><input type="date" id="bt-start"></label>
+        <label class="field"><span>To</span><input type="date" id="bt-end"></label>
+        <label class="field"><span>Brain</span><select id="bt-brain"></select></label>
+        <label class="field"><span>Start from memory</span><select id="bt-profile"></select></label>
+        <label class="field"><span>Save what it learns as profile</span><input type="text" id="bt-save" placeholder="e.g. live (optional)"></label>
+        <label class="field"><span>Run name (optional)</span><input type="text" id="bt-name" maxlength="80"></label>
+        <label class="check"><input type="checkbox" id="bt-learn" checked> Learn as it goes (off = frozen playbook, to measure what learning adds)</label>
+      </div>
+      <p class="small muted" id="bt-history"></p>
+      <div class="row gap">
+        <button class="btn primary" id="bt-run">Run backtest</button>
+        <button class="btn ghost hidden" id="bt-stop">Stop after this day</button>
+        <span class="small muted" id="bt-status"></span>
+      </div>
+      <pre class="log hidden" id="bt-log"></pre>
+    </div>
+    <div class="card">
+      <h3>How to tell whether it works</h3>
+      <ol class="steps">
+        <li>Run the free <b>gap-and-go</b> control over the whole range. That is the bar to beat.</li>
+        <li>Run <b>Claude, learning</b> over the same days, then the same with learning off. Select runs and press <b>Compare</b>: it pairs them day by day.</li>
+        <li>In each report, check <b>Is it learning?</b> (later blocks should beat earlier ones) and the <b>priced check-in interventions</b>.</li>
+        <li>Backtests only reach back about 60 days, so treat them as development. The real test is <b>live paper trading</b> going forward, on days nothing was tuned on. Look for 100+ trades with the average-R interval above zero.</li>
+      </ol>
+    </div>
+  </div>
+  <div class="card">
+    <div class="row between wrap">
+      <h3>Runs</h3>
+      <div class="row gap"><span class="small muted" id="cmp-hint">Select two or more runs to compare them on their shared days.</span><button class="btn tiny" id="cmp-go" disabled>Compare</button></div>
+    </div>
+    <div class="table-wrap tall"><table class="table" id="bt-runs"></table></div>
+    <div class="compare hidden" id="cmp"></div>
+  </div>
+</section>
+
+<!-- ============================== LIVE ============================== -->
+<section id="tab-live" class="tab-panel">
+  <div class="grid-2">
+    <div class="card">
+      <h2>Live paper account</h2>
+      <div id="lv-account" class="small"></div>
+      <p class="small muted">Live trading runs in its own window so it keeps going while this page is closed: <code>python -m daytrader live</code>, or option 2 in <code>Start Day Trader.bat</code>. It uses and keeps improving the <code>live</code> profile. Morning brief only: <code>python -m daytrader premarket</code>.</p>
+    </div>
+    <div class="card">
+      <h3>Today</h3>
+      <div class="table-wrap"><table class="table" id="lv-positions"></table></div>
+      <div class="feed" id="lv-events"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Playbook (live profile)</h3>
+    <div class="table-wrap tall"><table class="table" id="lv-playbook"></table></div>
+  </div>
+  <div class="grid-2">
+    <div class="card"><h3>Track record</h3><pre class="ledger" id="lv-track"></pre></div>
+    <div class="card"><h3>Check-in interventions, priced</h3><pre class="ledger" id="lv-mgmt"></pre></div>
+  </div>
+  <div class="card"><h3>Base rates it has learned</h3><pre class="ledger" id="lv-base"></pre></div>
+</section>
+
+<!-- ============================== USAGE ============================== -->
+<section id="tab-usage" class="tab-panel">
+  <div class="card">
+    <h2>Claude usage</h2>
+    <p class="small muted">Every call goes through the Claude Code CLI on your subscription: no API bill, but calls count toward your plan's usage limits. "API-equivalent" is what the same tokens would cost on the paid API, for scale only.</p>
+    <div class="tiles" id="u-tiles"></div>
+    <div class="notice hidden" id="u-limit"></div>
+  </div>
+  <div class="grid-2">
+    <div class="card"><h3>By model and effort</h3><div class="table-wrap"><table class="table" id="u-combos"></table></div></div>
+    <div class="card"><h3>By step of the day</h3><div class="table-wrap"><table class="table" id="u-steps"></table></div></div>
+  </div>
+  <div class="card"><h3>Recent calls</h3><div class="table-wrap tall"><table class="table" id="u-recent"></table></div></div>
+</section>
+
+<!-- ============================== SETTINGS ============================== -->
+<section id="tab-settings" class="tab-panel">
+  <div class="card">
+    <h2>Settings</h2>
+    <p class="small muted">Saved to <code>data/daytrader/settings.json</code>. Backtests and live trading read them when they start.</p>
+    <form id="s-form">
+      <fieldset><legend>Account and risk</legend><div class="grid-3">
+        <label class="field"><span>Starting equity ($)</span><input type="number" name="bankroll" step="1000" min="1000"></label>
+        <label class="field"><span>Risk per trade (% of equity at the stop)</span><input type="number" name="risk_per_trade_pct" step="0.05" min="0.05" max="5"></label>
+        <label class="field"><span>Daily loss stop (% of equity, 0 = off)</span><input type="number" name="max_daily_loss_pct" step="0.25" min="0"></label>
+        <label class="field"><span>Max open positions</span><input type="number" name="max_positions" step="1" min="1" max="10"></label>
+        <label class="field"><span>Max position size (% of equity)</span><input type="number" name="max_position_pct" step="5" min="1"></label>
+        <label class="field"><span>Max leverage (gross / equity)</span><input type="number" name="max_leverage" step="0.5" min="0.5" max="4"></label>
+        <label class="check"><input type="checkbox" name="allow_short"> Allow short trades</label>
+      </div></fieldset>
+      <fieldset><legend>Trading day (New York time)</legend><div class="grid-3">
+        <label class="field"><span>Stocks to focus on per day</span><input type="number" name="focus_max" step="1" min="1" max="10"></label>
+        <label class="field"><span>Scanner candidates shown</span><input type="number" name="scan_top" step="1" min="5" max="60"></label>
+        <label class="field"><span>Morning brief time</span><input type="text" name="premarket_time" placeholder="09:00"></label>
+        <label class="field"><span>Check-ins (comma-separated)</span><input type="text" name="checkins" placeholder="10:00, 11:30, 13:30, 15:00"></label>
+        <label class="field"><span>Flatten time</span><input type="text" name="flatten_time" placeholder="15:55"></label>
+      </div></fieldset>
+      <fieldset><legend>Costs</legend><div class="grid-3">
+        <label class="field"><span>Slippage per side (basis points)</span><input type="number" name="slippage_bps" step="0.5" min="0"></label>
+        <label class="field"><span>Commission per share ($)</span><input type="number" name="commission_per_share" step="0.001" min="0"></label>
+        <label class="field"><span>Minimum commission ($)</span><input type="number" name="commission_min" step="0.1" min="0"></label>
+      </div></fieldset>
+      <fieldset><legend>Learning</legend><div class="grid-3">
+        <label class="field"><span>Days between playbook clean-ups</span><input type="number" name="curate_every" step="1" min="0"></label>
+        <label class="field"><span>Max live rules</span><input type="number" name="max_rules" step="1" min="5" max="60"></label>
+        <label class="field"><span>Size cap for unproven ideas (0.25–1)</span><input type="number" name="trial_size_cap" step="0.05" min="0.25" max="1"></label>
+        <label class="field"><span>Names replayed for base rates</span><input type="number" name="baserate_names" step="1" min="0" max="40"></label>
+        <label class="field"><span>Lessons recalled per prompt</span><input type="number" name="memory_k" step="1" min="0" max="20"></label>
+        <label class="check"><input type="checkbox" name="learn"> Learn after each session</label>
+      </div></fieldset>
+      <fieldset><legend>News</legend><div class="grid-3">
+        <label class="check"><input type="checkbox" name="use_sec"> SEC EDGAR filings (exact times)</label>
+        <label class="check"><input type="checkbox" name="use_gdelt"> GDELT headlines (often rate-limited on office networks)</label>
+        <label class="field"><span>SEC contact ("Name you@example.com")</span><input type="text" name="sec_user_agent"></label>
+      </div></fieldset>
+      <fieldset><legend>Your notes to Claude (included in every prompt)</legend>
+        <textarea name="instructions" rows="5" maxlength="4000"></textarea>
+      </fieldset>
+      <div class="row gap"><button class="btn primary" type="submit">Save settings</button><span class="small muted" id="s-status"></span></div>
+    </form>
+    <p class="small muted">Claude CLI: <code id="s-cli"></code></p>
+  </div>
+  <div class="card">
+    <h2>Longer history (optional)</h2>
+    <p class="small muted">Yahoo keeps only ~60 days of 5-minute bars. A free Alpaca account reaches years back: sign up at alpaca.markets, open the paper-trading dashboard, generate an API key, and paste it here. It only reads market data, stays in <code>data/daytrader/alpaca.json</code>, and can be revoked on Alpaca's site any time.</p>
+    <div class="form-grid">
+      <label class="field"><span>API key ID</span><input type="text" id="a-key" autocomplete="off"></label>
+      <label class="field"><span>Secret key</span><input type="password" id="a-secret" autocomplete="off"></label>
+    </div>
+    <div class="row gap"><button class="btn" id="a-save">Save and test</button><span class="small muted" id="a-status"></span></div>
+  </div>
+</section>
+</main>
+
+<div class="toast hidden" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

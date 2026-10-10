@@ -19,5 +19,5 @@ originals.
 | [AI4Finance-Foundation/FinRobot](https://github.com/AI4Finance-Foundation/FinRobot) | Apache-2.0 | Treating headlines as untrusted text and sanitizing them before they reach a prompt. |
 | [Profit Mirage (arXiv 2510.07920)](https://arxiv.org/abs/2510.07920) | paper | The evidence that LLM trading results before a model's training cutoff are inflated by memorization. That is why backtests on those dates are refused by default. |
 
-The Claude CLI runner reuses this repository's own `kalshibot/claude_cli.py` (lean flags, exact
-model IDs, clean environment).
+The Claude CLI runner (`daytrader/llm.py`) keeps the lean-call recipe from this repository's earlier
+Kalshi bot (lean flags, exact model IDs, clean environment).

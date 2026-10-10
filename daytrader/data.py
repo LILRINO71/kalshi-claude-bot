@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 import requests
 
-from . import clock, store
+from . import alpaca, clock, store
 from .universe import INDEX_ETFS, STOCKS, aliases
 
 INTERVAL_S = {"1m": 60, "2m": 120, "5m": 300, "15m": 900}
@@ -34,7 +34,7 @@ SEC_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS = "https://data.sec.gov/submissions/CIK{:010d}.json"
 SEC_HEADER = "https://www.sec.gov/Archives/edgar/data/{cik}/{folder}/{acc}.hdr.sgml"
 # SEC asks automated tools to identify themselves; set your own contact in settings (sec_user_agent).
-SEC_UA = "kalshi-claude-bot daytrader research@example.com"
+SEC_UA = "ai-day-trader research@example.com"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/126.0 Safari/537.36")
 
@@ -160,6 +160,33 @@ class MarketData:
     def _day_path(self, tk, day):
         return store.CACHE / "yahoo" / self.interval / tk / f"{day}.json"
 
+    def _alpaca_path(self, tk, day):
+        return store.CACHE / "alpaca" / self.interval / tk / f"{day}.json"
+
+    def yahoo_oldest(self):
+        """The earliest day Yahoo still serves intraday bars of this size for."""
+        return (date.today() - timedelta(days=LOOKBACK_DAYS[self.interval])).isoformat()
+
+    def _alpaca_span(self, tickers, first, last, log=None):
+        """Fetch older days from Alpaca and cache every (ticker, day) in the span, empty days included."""
+        try:
+            got = alpaca.fetch(tickers, first, last, self.interval, log=log or (lambda *_: None))
+        except alpaca.AlpacaError as e:
+            FAILURES["alpaca"] = FAILURES.get("alpaca", 0) + 1
+            if log:
+                log(f"Alpaca history unavailable: {e}")
+            return {}
+        d = date.fromisoformat(first)
+        while d.isoformat() <= last:
+            k = d.isoformat()
+            if d.weekday() < 5:
+                for tk in tickers:
+                    rows = (got.get(tk) or {}).get(k, [])
+                    self._mem[(tk, k)] = rows
+                    store.write_json(self._alpaca_path(tk, k), rows)
+            d += timedelta(days=1)
+        return got
+
     def _complete(self, day):
         return time.time() > clock.at(day, "20:05")
 
@@ -191,14 +218,17 @@ class MarketData:
         if key in self._mem:
             return self._mem[key]
         cached = store.read_json(self._day_path(tk, day))
+        if cached is None:
+            cached = store.read_json(self._alpaca_path(tk, day))
         if cached is not None:
             rows = [tuple(r) for r in cached]
             self._mem[key] = rows
             return rows
-        oldest = (date.today() - timedelta(days=LOOKBACK_DAYS[self.interval])).isoformat()
-        if day < oldest:
-            self._mem[key] = []
-            return []
+        if day < self.yahoo_oldest():
+            if alpaca.configured():
+                self._alpaca_span([tk], day, day)
+            self._mem.setdefault(key, [])
+            return self._mem[key]
         last = min((date.fromisoformat(day) + timedelta(days=SPAN_DAYS[self.interval] - 1)).isoformat(),
                    clock.today_et())
         if not self._fetch_span(tk, day, last):
@@ -211,11 +241,21 @@ class MarketData:
         if not days:
             return
         tickers = list(dict.fromkeys(list(tickers or STOCKS) + list(INDEX_ETFS)))
-        oldest = (date.today() - timedelta(days=LOOKBACK_DAYS[self.interval])).isoformat()
+        oldest = self.yahoo_oldest()
         need = [d for d in days if d >= oldest]
-        if len(need) < len(days):
+        older = [d for d in days if d < oldest]
+        missing_old = [d for d in older if any(not self._day_path(tk, d).exists() and not self._alpaca_path(tk, d).exists()
+                                               for tk in tickers)]
+        if missing_old and alpaca.configured():
+            log(f"Fetching {len(missing_old)} older day(s) of {self.interval} bars from Alpaca "
+                f"({missing_old[0]} to {missing_old[-1]})")
+            for i in range(0, len(missing_old), 20):  # about a month of trading days per span
+                span = missing_old[i:i + 20]
+                self._alpaca_span(tickers, span[0], span[-1], log=log)
+        elif missing_old:
             log(f"Note: Yahoo only serves {self.interval} bars for the last ~{LOOKBACK_DAYS[self.interval]} days; "
-                f"{len(days) - len(need)} earlier day(s) will use the disk cache or be skipped.")
+                f"{len(missing_old)} earlier day(s) have no bars and will be skipped. A free Alpaca key reaches "
+                f"further back: python -m daytrader alpaca KEY SECRET")
         last_day = max(days)
         for i, tk in enumerate(tickers):
             self.daily_all(tk, clock.prev_weekday(last_day))
@@ -433,7 +473,7 @@ class MarketData:
     @property
     def news_failures(self):
         """News requests that failed after retries, by source, since the program started."""
-        return {h: n for h, n in FAILURES.items() if h != "yahoo"}
+        return {h: n for h, n in FAILURES.items() if h not in ("yahoo", "alpaca")}
 
 
 SEC_ITEMS = {

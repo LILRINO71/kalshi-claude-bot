@@ -1,23 +1,66 @@
 """Claude as the brain, through the Claude Code CLI on your Claude subscription (no API key).
 
-Same lean-call recipe as kalshibot.claude_cli (no tools, MCP servers or settings, empty working
-directory, exact model IDs), but generic: any prompt, any JSON schema. Every call is logged to
-data/usage.jsonl, so the dashboard's Usage tab counts day-trader calls too, and successful
-answers are cached by (model, effort, system, schema, prompt), so re-running a backtest is free.
+Calls are lean: no tools, MCP servers or settings, an empty working directory and a custom system
+prompt, so each one carries about 1.3k tokens of overhead instead of ~72k. Models are pinned to exact
+IDs and an answer from any other model is refused. Every call is logged to data/daytrader/usage.jsonl
+(the dashboard's Usage tab), and successful answers are cached by (model, effort, system, schema,
+prompt), so re-running a backtest is free.
 """
+import glob
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
-
-from kalshibot.claude_cli import LEAN_FLAGS, MODEL_IDS, clean_env, find_claude
+from pathlib import Path
 
 from . import store
 
+# Without these the CLI loads MCP servers, settings and its tool prompt: ~72k tokens a call instead of ~1.3k.
+LEAN_FLAGS = ["--tools", "", "--no-session-persistence", "--strict-mcp-config",
+              "--setting-sources", "", "--disable-slash-commands"]
+
+# Exact IDs: an inherited environment can remap the short aliases (we once caught "sonnet" running as Haiku).
+MODEL_IDS = {
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
+    "fable": "claude-fable-5-1",
+}
+
 _cache_lock = threading.Lock()
 _cache = None
+
+
+def clean_env():
+    """The parent environment minus Claude Code session variables that can change the model or behavior."""
+    keep = {"CLAUDE_CONFIG_DIR", "CLAUDE_BIN"}
+    return {k: v for k, v in os.environ.items()
+            if k in keep or not (k.startswith("CLAUDE_") or k.startswith("ANTHROPIC_"))}
+
+
+def find_claude():
+    """The Claude Code CLI: $CLAUDE_BIN, PATH, the desktop app's copy, or the Microsoft Store package folder."""
+    path = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+    if path:
+        return path
+    patterns = [
+        os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code", "*", "claude.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", "Claude_*", "LocalCache",
+                     "Roaming", "Claude", "claude-code", "*", "claude.exe"),
+        os.path.expanduser("~/.local/bin/claude.exe"),
+        os.path.expanduser("~/.local/bin/claude"),
+    ]
+    found = [p for pat in patterns for p in glob.glob(pat)]
+    if not found:
+        return None
+
+    def version_key(p):
+        return [int(x) if x.isdigit() else 0 for x in Path(p).parent.name.split(".")]
+    return max(found, key=version_key)
 
 
 class LLMError(RuntimeError):
@@ -61,7 +104,7 @@ def _parse(env):
     return out
 
 
-def ask(prompt, schema, *, system, model, effort, source, use_cache=True, timeout=600):
+def ask(prompt, schema, *, system, model, effort, source, use_cache=True, timeout=900):
     """Return (answer_dict, meta) where meta has latency_s, cached, tokens."""
     key = _key(model, effort, system, schema, prompt)
     if use_cache:
