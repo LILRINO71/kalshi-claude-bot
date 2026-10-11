@@ -33,9 +33,9 @@ DEFAULTS = {
     "premarket_time": "09:00",    # when the morning brief runs (New York time)
     "checkins": ["10:00", "11:30", "13:30", "15:00"],  # intraday reviews where Claude can act
     "flatten_time": "15:55",      # every position is closed at this time: day trading only
-    "risk_per_trade_pct": 0.5,    # % of equity lost if a full-size trade hits its stop
-    "max_position_pct": 25.0,     # cap on one position's value, % of equity
-    "max_leverage": 1.0,          # gross exposure / equity (raise to 2-4 for margin)
+    "risk_per_trade_pct": 1.0,    # % of equity lost if a full-size trade hits its stop
+    "max_position_pct": 50.0,     # cap on one position's value, % of equity
+    "max_leverage": 2.0,          # gross exposure / equity (a margin account allows up to 4 intraday)
     "max_positions": 3,
     "max_daily_loss_pct": 2.0,    # flatten and stop for the day; 0 disables
     "scale_out_r": 0.25,          # take part of every position off this many R past the fill (0 = never)

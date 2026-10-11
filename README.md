@@ -161,8 +161,8 @@ live trading uses, and an existing profile is never overwritten).
 |---|---|---|
 | `model` / `effort` | sonnet / medium | Claude model and effort |
 | `bankroll` | 25000 | Starting paper equity |
-| `risk_per_trade_pct` | 0.5 | Equity lost if a full-size trade hits its stop |
-| `max_position_pct` / `max_leverage` / `max_positions` | 25 / 1.0 / 3 | Exposure caps |
+| `risk_per_trade_pct` | 1.0 | Equity lost if a full-size trade hits its stop |
+| `max_position_pct` / `max_leverage` / `max_positions` | 50 / 2.0 / 3 | Exposure caps |
 | `max_daily_loss_pct` | 2.0 | Flatten and stop for the day |
 | `allow_short` | true | Allow short plans |
 | `focus_max` / `scan_top` | 4 / 25 | Stocks focused per day / scanner candidates shown |

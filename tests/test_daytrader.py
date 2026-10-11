@@ -46,7 +46,8 @@ def test_stop_entry_fills_at_trigger_or_gap_open():
     b.on_bar("AAA", bar("09:40", 100.5, 101.0, 100.2, 100.8))   # gapped over the trigger: fill at the open
     p = b.positions["AAA"]
     assert p["entry"] == pytest.approx(100.5 + 0.01)              # minimum one-cent slippage
-    assert p["shares"] == min(math.floor(25000 * 0.005 / (100.51 - 99.0)), math.floor(25000 * 0.25 / 100.51))
+    risk, cap = b.cfg["risk_per_trade_pct"] / 100, b.cfg["max_position_pct"] / 100
+    assert p["shares"] == min(math.floor(25000 * risk / (100.51 - 99.0)), math.floor(25000 * cap / 100.51))
 
 
 def test_same_bar_stop_counts_but_target_does_not():
