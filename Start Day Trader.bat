@@ -1,9 +1,11 @@
 @echo off
 title AI Day Trader (paper)
 cd /d "%~dp0"
-rem Find a real Python: "python" can be the Microsoft Store placeholder, so test that it runs.
+rem Find a real Python: this folder's .venv first, then "python" (which can be the Microsoft Store placeholder,
+rem so test that it runs), then the py launcher.
 set "PY="
-python -c "import sys" >nul 2>nul && set "PY=python"
+if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+if not defined PY (python -c "import sys" >nul 2>nul && set "PY=python")
 if not defined PY (py -3 -c "import sys" >nul 2>nul && set "PY=py -3")
 if not defined PY (echo Python 3.10+ is not installed. Get it from https://www.python.org/downloads/ and tick "Add python.exe to PATH". & pause & exit /b 1)
 %PY% -c "import flask, requests, tzdata" 2>nul || (echo Installing requirements, one time only... & %PY% -m pip install -r requirements.txt)

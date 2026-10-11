@@ -38,6 +38,8 @@ DEFAULTS = {
     "max_leverage": 1.0,          # gross exposure / equity (raise to 2-4 for margin)
     "max_positions": 3,
     "max_daily_loss_pct": 2.0,    # flatten and stop for the day; 0 disables
+    "scale_out_r": 0.25,          # take part of every position off this many R past the fill (0 = never)
+    "scale_out_frac": 0.75,       # ...this share of it; the stop on the rest then moves to the entry
     "allow_short": True,
     "slippage_bps": 2.0,          # per side, on top of the bar price (minimum one cent)
     "commission_per_share": 0.0,
@@ -58,8 +60,8 @@ DEFAULTS = {
 }
 
 _NUM = ("bankroll", "scan_top", "focus_max", "risk_per_trade_pct", "max_position_pct", "max_leverage",
-        "max_positions", "max_daily_loss_pct", "slippage_bps", "commission_per_share", "commission_min",
-        "curate_every", "max_rules", "trial_size_cap", "baserate_names", "memory_k", "news_per_ticker", "market_news")
+        "max_positions", "max_daily_loss_pct", "scale_out_r", "scale_out_frac", "slippage_bps",
+        "commission_per_share", "commission_min", "curate_every", "max_rules", "trial_size_cap", "baserate_names", "memory_k", "news_per_ticker", "market_news")
 _INT = ("scan_top", "focus_max", "max_positions", "curate_every", "max_rules", "baserate_names", "memory_k",
         "news_per_ticker", "market_news")
 
@@ -97,6 +99,10 @@ def validate(cfg):
         raise ValueError("trial_size_cap must be 0.25-1.0")
     if not 0 <= out["baserate_names"] <= 40:
         raise ValueError("baserate_names must be 0-40")
+    if out["scale_out_r"] and not 0.2 <= out["scale_out_r"] <= 3:
+        raise ValueError("scale_out_r must be 0 (off) or 0.2-3")
+    if not 0.25 <= out["scale_out_frac"] <= 0.75:
+        raise ValueError("scale_out_frac must be 0.25-0.75")
     out["universe"] = [str(t).upper() for t in (out["universe"] or [])]
     times = {}
     for k in ("premarket_time", "flatten_time"):

@@ -4,6 +4,7 @@ Run it before the open (or leave it running): it waits for the pre-market time, 
 brief and research, manages plans through the session, flattens before the close, reflects, and
 carries what it learned into the next day. Never places a real order.
 """
+import os
 import time
 
 from . import brains, clock, config, report, store
@@ -40,8 +41,20 @@ def _status(s, phase):
                               "events": b.events[-80:], "brief": s.brief, "plans": s.plans})
 
 
+def _keep_awake():
+    """Ask Windows not to sleep while this process runs: a sleeping PC misses the session. (Closing a laptop lid
+    can still force sleep; the request ends with the process.)"""
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        except (AttributeError, OSError):
+            pass
+
+
 def run(cfg, profile="live", once=False, log=print):
     store.ensure_dirs()
+    _keep_awake()
     cfg = config.validate(cfg)
     data = LiveData(cfg["interval"], cfg)
     folder = store.PROFILES / profile

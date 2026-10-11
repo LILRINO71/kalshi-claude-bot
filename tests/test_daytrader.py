@@ -130,6 +130,44 @@ def test_daily_loss_limit_flattens_and_blocks():
     assert not b.positions
 
 
+def test_scale_out_takes_half_at_half_r_and_moves_the_stop_to_entry():
+    b = broker(scale_out_r=0.5, scale_out_frac=0.5)
+    b.submit({"ticker": "AAA", "side": "long", "kind": "stop", "price": 100.0, "stop": 99.0, "target": 103.0}, 0)
+    b.on_bar("AAA", bar("09:35", 99.9, 100.8, 99.8, 100.4))      # fills at 100.01; no profit-taking on the entry bar
+    assert not b.positions["AAA"]["scaled"]
+    b.on_bar("AAA", bar("09:40", 100.4, 100.515, 100.3, 100.5))   # touches 0.5R (100.515) without trading through
+    assert not b.positions["AAA"]["scaled"]
+    b.on_bar("AAA", bar("09:45", 100.5, 100.9, 100.4, 100.8))
+    p = b.positions["AAA"]
+    n, half = p["orig_shares"], p["scale_shares"]
+    assert p["scaled"]["price"] == pytest.approx(100.515) and p["shares"] == n - half and p["stop"] == p["entry"]
+    b.on_bar("AAA", bar("09:50", 100.8, 100.8, 99.9, 100.0))     # back to the entry: the rest goes out flat
+    t = b.trades[0]
+    assert t["exit_reason"] == "stop" and t["shares"] == n and t["scaled"]["shares"] == half and t["pnl"] > 0
+    assert t["r"] == pytest.approx((0.505 * half - 0.01 * (n - half)) / (1.01 * n), abs=0.01)
+    assert b.realized == pytest.approx(t["pnl"], abs=0.01)
+
+
+def test_scale_out_and_target_in_one_bar_on_a_short():
+    b = broker(scale_out_r=0.5)
+    b.submit({"ticker": "AAA", "side": "short", "kind": "stop", "price": 50.0, "stop": 51.0, "target": 49.0}, 0)
+    b.on_bar("AAA", bar("09:35", 50.1, 50.2, 49.95, 50.0))        # sells at 49.99
+    b.on_bar("AAA", bar("09:40", 50.0, 50.1, 48.8, 48.9))         # through 0.5R (49.485) and the target
+    t = b.trades[0]
+    n, half = t["shares"], t["scaled"]["shares"]
+    assert t["exit_reason"] == "target" and t["scaled"]["price"] == pytest.approx(49.485)
+    assert t["r"] == pytest.approx((0.505 * half + 0.99 * (n - half)) / (1.01 * n), abs=0.01)
+
+
+def test_no_scale_out_when_off_or_on_a_single_share():
+    for kw in ({"scale_out_r": 0}, {"scale_out_r": 0.5, "risk_per_trade_pct": 0.005}):
+        b = broker(**kw)
+        b.submit({"ticker": "AAA", "side": "long", "kind": "stop", "price": 100.0, "stop": 99.0, "target": 103.0}, 0)
+        b.on_bar("AAA", bar("09:35", 99.9, 100.1, 99.8, 100.0))
+        b.on_bar("AAA", bar("09:40", 100.0, 101.0, 99.95, 100.9))
+        assert not b.positions["AAA"]["scaled"] and b.positions["AAA"]["stop"] == 99.0
+
+
 # ---------------------------------------------------------------- memory
 
 def test_rules_get_outcome_credit_and_evolve(tmp_path):
@@ -138,7 +176,7 @@ def test_rules_get_outcome_credit_and_evolve(tmp_path):
     r2 = m.add_rule("When SPY is red, size down", ["risk"], DAY)
     for _ in range(5):
         m.record_trade({"rules": [r1["id"], r2["id"]], "r": 2.0, "pnl": 100})
-    assert r1["sum_r"] == pytest.approx(5.0) and r2["sum_r"] == pytest.approx(5.0)
+    assert r1["sum_r"] == pytest.approx(10.0) and r2["sum_r"] == pytest.approx(10.0)  # full R to each cited rule
     m.evolve(DAY, 25)
     assert r1["status"] == "active"
     loser = m.add_rule("When anything happens, buy it", [], DAY)
@@ -603,7 +641,7 @@ def test_replay_simulates_one_order_with_the_broker_rules():
             bar("09:45", 100.3, 102.5, 100.2, 102.4), bar("09:50", 102.4, 102.6, 102.0, 102.1)]
     order = {"ticker": "AAA", "side": "long", "kind": "stop", "price": 100.0, "stop": 99.0, "target": 102.0,
              "active_from": clock.at(DAY, "09:35")}
-    res = replay.simulate(order, bars, cfg(slippage_bps=0), clock.at(DAY, "15:55"))
+    res = replay.simulate(order, bars, cfg(slippage_bps=0, scale_out_r=0), clock.at(DAY, "15:55"))
     assert res["exit_reason"] == "target" and res["r"] == pytest.approx((102.0 - 100.01) / (100.01 - 99.0), abs=0.01)
     never = {**order, "price": 105.0, "stop": 104.0, "target": 107.0}
     assert replay.simulate(never, bars, cfg(), clock.at(DAY, "15:55")) is None

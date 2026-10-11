@@ -28,7 +28,7 @@ python -m daytrader                      # dashboard at http://127.0.0.1:8050
 | 09:00 | **Scan** | Code ranks ~110 liquid stocks by pre-market gap relative to each stock's ATR, pre-market activity, liquidity, headline mentions and SEC filings. |
 | 09:00 | **Morning brief** | Claude reads the overnight news, SPY/QQQ/IWM, the scanner, its playbook, recalled lessons, its **track record** and the **base rates** (below). It picks up to 4 stocks to focus on (zero is allowed) and states the regime. |
 | 09:00 | **Research** | For each focus stock: the previous session, ATR, 20-day range, pre-market bars, its own news, lessons about it, and how simple setups have recently played out on it. Claude argues a bull and a bear case, then writes at most one **trade plan** per stock: entry type and price, stop, target, window, optional time exit and breakeven move, size, setup and the rules it relies on. |
-| 09:35–15:55 | **Trading** | The paper broker works the plans bar by bar. Code sizes every position (0.5% of equity at risk by default), caps it, and enforces a daily loss stop. Claude never sets share counts. |
+| 09:35–15:55 | **Trading** | The paper broker works the plans bar by bar. Code sizes every position (0.5% of equity at risk by default), caps it, and enforces a daily loss stop. Claude never sets share counts. Profit-taking is code too: at +0.25R three quarters of the position is sold and the stop on the rest moves to the entry (`scale_out_r`, `scale_out_frac`). |
 | 10:00, 11:30, 13:30, 15:00 | **Check-ins** | Claude sees each stock in play (price, VWAP, opening range, 30-minute bars, position, working orders, news since the open) plus its **priced intervention record**, and can hold, adjust, cancel, exit or enter. Its answer takes effect only after its real response time. |
 | 15:55 | **Flatten** | Every position is closed. Day trading only. |
 | 16:05 | **Evidence** | Code settles every plan (filled, expired, cancelled), prices every check-in change against the same plan left alone, and replays four mechanical setups on the scanner's top names. |
@@ -41,9 +41,8 @@ That is about 7 Claude calls a day: brief, research, up to 4 check-ins (skipped 
 
 The learning loop is built so that numbers decide, not stories:
 
-- **Rules are judged on results.** Every trade credits its R-multiple to the rules it cited (half to the primary rule,
-  half split among the rest). Stats are shrunk toward zero (`R~ = total R / (trades + 5)`), so two lucky trades can't
-  make a rule:
+- **Rules are judged on results.** A rule's record is the R-multiples of the trades that cited it. Stats are shrunk
+  toward zero (`R~ = total R / (trades + 5)`), so two lucky trades can't make a rule:
 
   | Change | Condition |
   |---|---|

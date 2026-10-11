@@ -4,10 +4,11 @@ Design, adapted from open-source agent research (see CREDITS.md):
 - Playbook rules are itemized with evidence counters, as in ACE (Agentic Context Engineering).
   The playbook only changes through small delta operations (add, edit, merge, retire), never a
   full rewrite, which ACE showed can collapse a playbook to a fraction of its content.
-- Rules are judged on outcomes, not on how convincing a reflection sounded: every trade credits
-  the R-multiple it made to the rules it cited (half to the primary rule, half split among the
-  rest). Stats are shrunk toward zero, R~ = sum_R / (n + 5), so a lucky trade or two can't promote
-  a rule, and losing rules are retired automatically. The model's own helpful/harmful opinions
+- Rules are judged on outcomes, not on how convincing a reflection sounded: each rule's record is the
+  R-multiples of the trades that cited it. Stats are shrunk toward zero, R~ = sum_R / (n + 5), so a
+  lucky trade or two can't promote a rule, and losing rules are retired automatically. (Splitting each
+  trade's R among its rules, as an earlier version did, diluted every rule's record so far that in a
+  71-day test no rule with a positive record ever reached promotion.) The model's own helpful/harmful opinions
   only decide the fate of rules that have no trades yet.
 - Lessons live in short- and long-term layers with FinMem-style scoring: recency decay +
   importance + BM25 relevance. Queries and lessons carry discrete "situation fingerprint" tokens
@@ -274,18 +275,16 @@ class Memory:
                     r["status"] = "trial"
 
     def record_trade(self, trade):
-        """Outcome attribution: half the trade's R to the primary (first) cited rule, half split among the rest."""
+        """Outcome attribution: every rule a trade cited is credited with the trade's full R."""
         r_mult = trade.get("r")
         ids = [i for i in dict.fromkeys(trade.get("rules") or []) if self.rule(i)]
         if r_mult is None or not ids:
             return
-        shares = [1.0] if len(ids) == 1 else [0.5] + [0.5 / (len(ids) - 1)] * (len(ids) - 1)
-        for rid, w in zip(ids, shares):
+        for rid in ids:
             r = self.rule(rid)
-            credit = r_mult * w
             r["uses"] += 1
-            r["sum_r"] = round(r["sum_r"] + credit, 4)
-            r["sum_r2"] = round(r["sum_r2"] + credit * credit, 4)
+            r["sum_r"] = round(r["sum_r"] + r_mult, 4)
+            r["sum_r2"] = round(r["sum_r2"] + r_mult * r_mult, 4)
             r["wins" if trade["pnl"] > 0 else "losses"] += 1
             r["last_cited"] = self.day_index
 
@@ -335,6 +334,10 @@ class Memory:
         conf = [t for t in tr if isinstance(t.get("confidence"), (int, float))]
         out.append(" | ".join(filter(None, [_line("Confidence >= 0.55", [t for t in conf if t["confidence"] >= 0.55]),
                                             _line("Confidence < 0.55", [t for t in conf if t["confidence"] < 0.55])])))
+        part = [t for t in tr if t.get("scaled")]
+        if part:
+            out.append(" | ".join(filter(None, [_line("Partial profit taken", part),
+                                                _line("Never reached it", [t for t in tr if not t.get("scaled")])])))
         mfe = [t["mfe_r"] for t in tr if t.get("mfe_r") is not None]
         rs = [t["r"] for t in tr if t.get("r") is not None]
         if mfe and rs:

@@ -191,7 +191,11 @@ def _risk_line(cfg):
     return (f"Standard risk is {cfg['risk_per_trade_pct']}% of equity at the stop (size 1.0); the desk computes "
             f"shares. Max {cfg['max_positions']} open positions, positions capped at {cfg['max_position_pct']:.0f}% "
             f"of equity, shorting {'allowed' if cfg['allow_short'] else 'NOT allowed'}, daily loss stop "
-            f"{cfg['max_daily_loss_pct']}%. Everything is flattened at {cfg['flatten_time']}.")
+            f"{cfg['max_daily_loss_pct']}%. Everything is flattened at {cfg['flatten_time']}."
+            + (f" Profit-taking is automatic: once a position is {cfg['scale_out_r']:g}R in profit (measured from the "
+               f"actual fill), the desk sells {cfg['scale_out_frac'] * 100:.0f}% of it and moves the stop on the rest "
+               f"to the entry. Your target, time_exit and later stop changes apply to the rest."
+               if cfg.get("scale_out_r") else ""))
 
 
 def _notes(cfg):

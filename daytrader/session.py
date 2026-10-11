@@ -448,7 +448,7 @@ class DaySession:
                 "mfe_r": round(t["mfe"] / risk, 2) if risk else None,
                 "mae_r": round(t["mae"] / risk, 2) if risk else None,
                 "origin": "checkin" if "-checkin-" in str(t.get("plan_id") or "") else "premarket",
-                "confidence": t.get("confidence"), "rules": t.get("rules") or []}
+                "confidence": t.get("confidence"), "rules": t.get("rules") or [], "scaled": bool(t.get("scaled"))}
 
     def _record_evidence(self, view):
         """Once per day, even if the reflection is retried: settle plans, price interventions, replay base
