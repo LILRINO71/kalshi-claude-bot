@@ -105,6 +105,7 @@ class DaySession:
         view = self.data.view(now)
         prev_close_ts = clock.at(self.data.prev_trading_day(self.day), "16:00")
         self.market_news = view.news_market(prev_close_ts, now, self.cfg["market_news"]) if news else []
+        headlines = view.news_by_ticker(self.universe, prev_close_ts, now) if news else {}
         mentions = {}
         for item in self.market_news:
             for tk in mentioned(item["title"], self.universe):
@@ -123,6 +124,7 @@ class DaySession:
                 fp.append("earnings")
             rows.append({"ticker": tk, "name": name_of(tk), "sector": sector_of(tk), "daily": d, "pm": pm,
                          "news_mentions": mentions.get(tk, 0), "filings": filings, "fp": fp,
+                         "headlines": headlines.get(tk, [])[:3], "n_headlines": len(headlines.get(tk, [])),
                          "score": features.scan_score(d, pm) + catalyst})
         context = {r["ticker"]: r for r in rows if r["ticker"] in CONTEXT}
         stocks = [r for r in rows if r["ticker"] not in CONTEXT]

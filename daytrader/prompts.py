@@ -231,6 +231,9 @@ def morning(ctx):
     ctxt = "\n".join(_context_line(tk, r) for tk, r in ctx["context"].items())
     filings = [f"- {r['ticker']}: {clock.to_et(f['ts']).strftime('%a %H:%M')} {clean(f['title'])}"
                for r in ctx["scan"] for f in (r.get("filings") or [])[:3]]
+    heads = [f"- {r['ticker']} ({r['n_headlines']} since the close): " + " | ".join(
+                 f"{clock.to_et(h['ts']).strftime('%a %H:%M')} {clean(h['title'], 160)}" for h in r["headlines"][:2])
+             for r in ctx["scan"] if r.get("headlines")]
     return f"""{_header(ctx, "before the open")}
 
 YOUR PLAYBOOK (rules you wrote; cite their ids when you rely on one)
@@ -252,6 +255,10 @@ OVERNIGHT AND PRE-MARKET NEWS (newest first)
 
 SEC FILINGS SINCE THE PREVIOUS CLOSE (scanner names; exact acceptance times)
 {chr(10).join(filings) or '(none)'}
+
+LATEST HEADLINES ON SCANNER NAMES SINCE THE PREVIOUS CLOSE (newest first, exact times; stories about at most three
+companies)
+{chr(10).join(heads) or '(none)'}
 
 PRE-MARKET SCANNER: liquid stocks ranked by gap size relative to their own ATR, pre-market activity and filings
 (pmAct = share of pre-market 5-minute bars with trades; the data source has no pre-market volume; avg$vol = 20-day

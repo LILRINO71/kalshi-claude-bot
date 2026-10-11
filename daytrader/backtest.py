@@ -154,8 +154,9 @@ def run(cfg, start, end, name="", profile=None, save_profile=None, allow_leaky=F
             failed = {h: n - failures.get(h, 0) for h, n in data.news_failures.items() if n > failures.get(h, 0)}
             if failed:
                 row["news_failures"] = failed
+                hint = " (GDELT often rate-limits shared networks; set use_gdelt false to skip it)" if "gdelt" in failed else ""
                 log(f"{day}: news requests failed ({', '.join(f'{h} x{n}' for h, n in failed.items())}); "
-                    f"prompts had less news (GDELT often rate-limits shared networks; set use_gdelt false to skip it)")
+                    f"prompts had less news{hint}")
             row.update({"seconds": round(time.time() - t0, 1), "brief": s.brief, "plans_detail": s.plans,
                         "checkins": s.checkins, "reflection": s.reflection, "events": s.broker.events,
                         "notes": s.notes, "scan": [{k: r[k] for k in ("ticker", "score", "news_mentions")} |

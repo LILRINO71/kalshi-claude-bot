@@ -8,8 +8,10 @@ APCA_API_SECRET_KEY) or from data/daytrader/alpaca.json, which `python -m daytra
 
 Bars are normalized to look like Yahoo's so the scanner and features behave the same on both sources:
 split-adjusted prices, timestamps at the bar's start, and pre/post-market volume reported as zero (Yahoo
-reports none). Only market data is read; this module can't place orders.
+reports none). The same key reads Alpaca's news service (Benzinga headlines with exact publication times,
+past and present). Only market data and news are read; this module can't place orders.
 """
+import html
 import os
 import re
 import time
@@ -20,6 +22,7 @@ import requests
 from . import clock, store
 
 URL = "https://data.alpaca.markets/v2/stocks/bars"
+NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
 TIMEFRAMES = {"1m": "1Min", "2m": "2Min", "5m": "5Min", "15m": "15Min"}
 BATCH = 40          # symbols per request
 GAP_S = 0.35        # the free plan allows 200 requests a minute
@@ -131,3 +134,52 @@ def fetch(tickers, first_day, last_day, interval="5m", log=print):
             if not token:
                 break
     return {tk: normalize(bars) for tk, bars in raw.items()}
+
+
+def _parse_ts(text):
+    return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+
+
+def news(tickers, start_ts, end_ts, pages=2):
+    """Headlines tagged with any of `tickers` between two times, newest first, at most 50 per page:
+    [{ts, known_ts, title, source, url, symbols}], or None when there is no key or a request failed (so a
+    caller never caches a partial answer). `ts` is first publication; a story edited later counts as known
+    only from its last update, because the edited headline is the one that comes back."""
+    k = keys()
+    if not k or not tickers:
+        return None
+    headers = {"APCA-API-KEY-ID": k[0], "APCA-API-SECRET-KEY": k[1]}
+    ours = {symbol(tk): tk for tk in tickers}
+    params = {"symbols": ",".join(ours), "start": _iso(start_ts), "end": _iso(end_ts), "limit": 50, "sort": "desc"}
+    out, token = [], None
+    for _ in range(pages):
+        for tries in range(3):
+            time.sleep(GAP_S * (1 + 4 * tries))
+            try:
+                r = _session.get(NEWS_URL, params={**params, **({"page_token": token} if token else {})},
+                                 headers=headers, timeout=30)
+            except requests.RequestException:
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                continue
+            break
+        else:
+            return None
+        if r.status_code != 200:
+            return None
+        js = r.json()
+        for n in js.get("news") or []:
+            try:
+                ts = _parse_ts(n["created_at"])
+                known = max(ts, _parse_ts(n.get("updated_at") or n["created_at"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            title = html.unescape(n.get("headline") or "").strip()
+            if title:
+                out.append({"ts": ts, "known_ts": known, "coarse": False, "title": title,
+                            "source": (n.get("source") or "benzinga").capitalize(), "url": n.get("url") or "",
+                            "symbols": [ours.get(s, s.replace(".", "-")) for s in n.get("symbols") or []]})
+        token = js.get("next_page_token")
+        if not token:
+            break
+    return out

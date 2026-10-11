@@ -114,7 +114,11 @@ open; an entry that gaps past its target or more than 1R past its trigger is can
 News timing: **SEC EDGAR** filings carry exact acceptance times (taken from each filing's header). **GDELT** headlines
 are exact to about 15 minutes and held back one more cycle; GDELT covers about 3 months and often rate-limits shared
 networks (set `use_gdelt` to false to skip it). **Google News** results are dated to the day only, so each is held back
-until its day is over.
+until its day is over. With an Alpaca key, **Alpaca's news service** (Benzinga) adds headlines with exact times for
+past days as well as today: economic releases and market stories for the morning brief, the latest headlines on every
+scanner name, and each focus stock's news. A story edited after it came out counts only from its last edit. Without
+it, a backtest's morning has almost no same-day headlines (GDELT is usually rate-limited), while a live morning does,
+so backtests would be tested on thinner news than live trading gets.
 
 **No days the model may remember.** Claude backtests before the model's training cutoff (June 2026 for the current
 models; override per model in `knowledge_cutoff`) are refused unless you pass `--allow-leaky`, and such runs are flagged.
@@ -168,7 +172,7 @@ live trading uses, and an existing profile is never overwritten).
 | `trial_size_cap` | 0.5 | Largest size for a plan that relies only on unproven rules |
 | `baserate_names` | 15 | Scanner names the mechanical setups are replayed on each day |
 | `universe` | all of `universe.py` | Tickers to scan |
-| `use_sec` / `use_gdelt` | true / true | News sources (Google News is always on) |
+| `use_sec` / `use_gdelt` / `use_alpaca_news` | true / true / true | News sources (Google News is always on; Alpaca's needs a saved key) |
 | `sec_user_agent` | generic | SEC asks automated tools to send "Your Name you@example.com"; set yours here |
 | `instructions` | "" | Your own notes, included in every prompt |
 

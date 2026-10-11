@@ -55,6 +55,7 @@ DEFAULTS = {
     "knowledge_cutoff": {},       # per-model overrides of KNOWLEDGE_CUTOFF
     "use_sec": True,              # SEC EDGAR filings (earnings 8-Ks, offerings) with exact times
     "use_gdelt": True,            # GDELT headlines with exact times (often rate-limited on shared networks)
+    "use_alpaca_news": True,      # Alpaca's news service (Benzinga, exact times), when an Alpaca key is saved
     "sec_user_agent": "",         # SEC asks for "Name contact@email"; blank uses a generic one
     "instructions": "",           # your own notes for Claude, always included
 }
@@ -87,7 +88,7 @@ def validate(cfg):
             out[k] = int(out[k]) if k in _INT else float(out[k])
         except (TypeError, ValueError):
             raise ValueError(f"{k} must be a number")
-    for k in ("allow_short", "learn", "use_sec", "use_gdelt"):
+    for k in ("allow_short", "learn", "use_sec", "use_gdelt", "use_alpaca_news"):
         out[k] = out[k] if isinstance(out[k], bool) else str(out[k]).lower() in ("1", "true", "yes", "on")
     if out["bankroll"] <= 0 or not 0 < out["risk_per_trade_pct"] <= 5:
         raise ValueError("bankroll must be positive and risk_per_trade_pct in (0, 5]")

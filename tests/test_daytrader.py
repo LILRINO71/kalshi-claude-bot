@@ -281,6 +281,10 @@ class FakeData:
     def news_ticker(self, tk, start, end, limit=8):
         return self.news_market(start, end, limit) if tk == "AAA" else []
 
+    def news_by_ticker(self, tickers, start, end):
+        aaa = self.news_ticker("AAA", start, end) if "AAA" in tickers else []
+        return {"AAA": aaa} if aaa else {}
+
     def sec_filings(self, tk, start, end):
         t = clock.at(PREV, "16:05")
         return [{"ts": t, "known_ts": t, "coarse": False, "source": "SEC EDGAR", "title": "SEC 8-K: earnings results",
@@ -411,6 +415,7 @@ def test_prompts_render_and_hide_nothing_from_the_wrong_time():
     text = prompts.morning(brain.seen["morning"])
     assert "AAA raises guidance" in text and "CEO resigns" not in text and "PRE-MARKET SCANNER" in text
     assert "AAA: Tue 16:05 SEC 8-K: earnings results" in text
+    assert "- AAA (1 since the close): Wed 08:00 AAA raises guidance" in text
     assert "bull case" in prompts.research(brain.seen["research"])
     assert "minutes until the desk flattens" in prompts.checkin(brain.seen["checkins"][0])
     assert "WHAT THE SCANNER'S TOP NAMES ACTUALLY DID" in prompts.reflect(brain.seen["reflect"])
@@ -882,6 +887,101 @@ def test_days_older_than_yahoo_come_from_alpaca_and_are_cached(monkeypatch):
     assert calls and set(calls[0][0]) >= {"AAA", "SPY"}
     again = data_mod.MarketData()                                       # a new process reads the disk cache
     assert again.intraday("AAA", old)[0][4] == 1.05 and len(calls) == 1
+
+
+class _Resp:
+    def __init__(self, code, js=None, text=""):
+        self.status_code, self._js, self.text = code, js, text
+
+    def json(self):
+        return self._js
+
+
+def test_alpaca_news_pages_times_and_symbols(monkeypatch):
+    from daytrader import alpaca
+    _no_alpaca_env(monkeypatch)
+    assert alpaca.news(["AAPL"], 0, 1) is None                       # no key: no news, no error
+    alpaca.save_keys("k", "s")
+    monkeypatch.setattr(alpaca, "GAP_S", 0)
+    pages = {None: {"news": [{"created_at": "2026-07-16T09:57:01Z", "updated_at": "2026-07-16T09:57:01Z",
+                              "headline": "UnitedHealth Sees FY2026 EPS Above Est", "source": "benzinga",
+                              "symbols": ["UNH"], "url": "u1"}],
+                    "next_page_token": "p2"},
+             "p2": {"news": [{"created_at": "2026-07-16T08:00:00Z", "updated_at": "2026-07-16T13:00:00Z",
+                              "headline": "Berkshire &amp; Brookfield", "symbols": ["BRK.B", "BN"]}],
+                    "next_page_token": None}}
+    asked = []
+
+    def fake_get(url, params, headers, timeout):
+        asked.append(params)
+        return _Resp(200, pages[params.get("page_token")])
+    monkeypatch.setattr(alpaca._session, "get", fake_get)
+    items = alpaca.news(["UNH", "BRK-B"], clock.at("2026-07-15", "16:00"), clock.at("2026-07-16", "09:30"))
+    assert asked[0]["symbols"] == "UNH,BRK.B" and asked[0]["sort"] == "desc" and asked[1]["page_token"] == "p2"
+    assert [i["title"] for i in items] == ["UnitedHealth Sees FY2026 EPS Above Est", "Berkshire & Brookfield"]
+    assert clock.hhmm(items[0]["ts"]) == "05:57" and items[0]["known_ts"] == items[0]["ts"]
+    assert clock.hhmm(items[1]["known_ts"]) == "09:00"               # edited later: known only from the edit
+    assert items[1]["symbols"] == ["BRK-B", "BN"] and items[0]["source"] == "Benzinga"
+    monkeypatch.setattr(alpaca._session, "get", lambda *a, **k: _Resp(403, text="forbidden"))
+    assert alpaca.news(["UNH"], 0, 1) is None
+
+
+def test_alpaca_headlines_reach_the_morning_on_time_and_are_cached(monkeypatch):
+    from daytrader import alpaca, data as data_mod
+    _no_alpaca_env(monkeypatch)
+    alpaca.save_keys("k", "s")
+    monkeypatch.setattr(data_mod, "_get", lambda *a, **k: None)          # Google News, GDELT, SEC: offline
+    monkeypatch.setattr(data_mod.MarketData, "daily_all", lambda self, tk, need_day=None: [])
+    t = lambda hhmm: clock.at(DAY, hhmm)
+    story = lambda ts, title, syms, known=None: {"ts": ts, "known_ts": known or ts, "coarse": False, "title": title,
+                                                 "source": "Benzinga", "url": "", "symbols": syms}
+    feed = [story(t("07:10"), "AAA beats estimates", ["AAA"]),
+            story(t("08:40"), "AAA and BBB sign a deal", ["AAA", "BBB"]),
+            story(t("08:50"), "Earnings scheduled for today", ["AAA", "BBB", "CCC", "DDD", "EEE"]),
+            story(t("08:20"), "$1000 Invested In AAA 5 Years Ago Would Be Worth This Much Today", ["AAA"]),
+            story(t("06:00"), "AAA guidance edited after the open", ["AAA"], known=t("10:00")),
+            story(t("09:45"), "AAA halted", ["AAA"])]
+    calls = []
+
+    def fake_news(tickers, a, b, pages=2):
+        calls.append((tuple(tickers), clock.hhmm(a), clock.hhmm(b)))
+        return [i for i in feed if a <= i["ts"] < b and set(i["symbols"]) & set(tickers)]
+    monkeypatch.setattr(alpaca, "news", fake_news)
+    md = data_mod.MarketData("5m", cfg(use_sec=False, use_gdelt=False))
+    v = md.view(t("09:00"))
+    by = v.news_by_ticker(["AAA", "BBB"], clock.at(PREV, "16:00"), t("16:00"))
+    assert [i["title"] for i in by["AAA"]] == ["AAA and BBB sign a deal", "AAA beats estimates"]
+    assert [i["title"] for i in by["BBB"]] == ["AAA and BBB sign a deal"]   # round-ups and later news left out
+    titles = [i["title"] for i in v.news_ticker("AAA", t("09:00") - 3 * 86400, t("16:00"))]
+    assert titles == ["AAA and BBB sign a deal", "AAA beats estimates"]
+    later = [i["title"] for i in md.view(t("10:30")).news_ticker("AAA", t("09:30"), t("10:30"))]
+    assert later == ["AAA halted"]
+    n = len(calls)
+    again = data_mod.MarketData("5m", cfg(use_sec=False, use_gdelt=False))   # a past day: read from the cache
+    assert again.view(t("09:00")).news_by_ticker(["AAA", "BBB"], 0, t("16:00")) == by and len(calls) == n
+    off = data_mod.MarketData("5m", cfg(use_sec=False, use_gdelt=False, use_alpaca_news=False))
+    assert off.news_by_ticker(["AAA"], 0, t("16:00")) == {} and len(calls) == n
+
+
+def test_todays_unfinished_daily_bar_is_never_kept(monkeypatch):
+    from daytrader import data as data_mod
+    friday, monday = "2026-10-09", "2026-10-12"
+    chart = {"chart": {"result": [{"timestamp": [clock.at(friday, "09:30"), clock.at(monday, "09:30")],
+                                   "indicators": {"quote": [{"open": [1, 2], "high": [1, 2], "low": [1, 2],
+                                                             "close": [1, 2], "volume": [5, 6]}]}}]}}
+    monkeypatch.setattr(data_mod, "_get", lambda *a, **k: chart)
+    monkeypatch.setattr(clock, "today_et", lambda: monday)
+
+    class Clock:
+        now = clock.at(monday, "09:00")
+
+        @staticmethod
+        def time():
+            return Clock.now
+    monkeypatch.setattr(data_mod, "time", Clock)
+    assert [r[0] for r in data_mod.MarketData().daily_all("AAA", friday)] == [friday]   # pre-market: not a close
+    Clock.now = clock.at(monday, "16:45")
+    assert [r[0] for r in data_mod.MarketData().daily_all("AAA", monday)] == [friday, monday]
 
 
 def test_market_regimes_label_days_and_split_results():

@@ -5,12 +5,14 @@
   completed day is cached on disk forever: the longer you use it, the more history you have.
 - News: SEC EDGAR filings with their exact acceptance times (earnings 8-Ks, offerings, deals),
   Google News search (dated to the day for past results, so each item is held back until its day
-  is over) and, when it isn't rate-limited, the GDELT DOC API (exact to ~15 minutes). Everything is
+  is over), the GDELT DOC API (exact to ~15 minutes) when it isn't rate-limited, and, with an Alpaca
+  key, Alpaca's news service (Benzinga, exact to the second, past days included). Everything is
   filtered by when it became known, so a backtest never shows news from after the simulated moment.
 
 Every read goes through a View, which hides anything after its `now`.
 """
 import email.utils
+import hashlib
 import json
 import re
 import threading
@@ -115,6 +117,7 @@ class MarketData:
         self._daily = {}
         self.sec_enabled = cfg.get("use_sec", True)
         self.gdelt_enabled = cfg.get("use_gdelt", True)
+        self.alpaca_news_enabled = cfg.get("use_alpaca_news", True)
         self.sec_user_agent = cfg.get("sec_user_agent") or SEC_UA
         self._ciks, self._subs, self._acc = None, {}, None
 
@@ -140,6 +143,11 @@ class MarketData:
                 for t, o, h, l, c, v in bars:
                     by_day[clock.day_of(t)] = (clock.day_of(t), o, h, l, c, v)
                 rows = [by_day[k] for k in sorted(by_day)]
+                # Today's bar isn't final until after the close; cached, it would pass for the whole day
+                # tomorrow (a live run that started before the open would take a pre-market price as the close).
+                today = clock.today_et()
+                if time.time() < clock.at(today, "16:30"):
+                    rows = [r for r in rows if r[0] < today]
                 store.write_json(path, {"fetched": time.time(), "rows": rows})
         self._daily[tk] = rows
         return rows
@@ -369,12 +377,48 @@ class MarketData:
         return self._cached_news(f"{key}_{first}_{last}", clock.at(last, "03:00"),
                                  lambda: self._gnews(query, first, last))
 
+    def _alpaca_day(self, key, tickers, day, pages, back_days=0):
+        """Alpaca (Benzinga) headlines tagged with any of `tickers`: from the previous close (or `back_days`
+        calendar days before this day) to the open, and through the session, in two windows so the busy session
+        can't crowd the overnight and pre-market news out of the page limit. Unlike Google News, these carry
+        exact times for past days too, so a backtest's morning sees what a live morning sees."""
+        if not self.alpaca_news_enabled or not alpaca.configured():
+            return []
+        start = (clock.at((date.fromisoformat(day) - timedelta(days=back_days)).isoformat(), "16:00") if back_days
+                 else clock.at(self.prev_trading_day(day), "16:00"))
+        op, cl = clock.at(day, "09:30"), clock.at(day, "16:00")
+
+        def fetch(a, b):
+            items = alpaca.news(tickers, a, b, pages)
+            if items is None:
+                FAILURES["alpaca news"] = FAILURES.get("alpaca news", 0) + 1
+            return items
+        out = []
+        for part, (a, b) in (("pre", (start, op)), ("rth", (op, cl))):
+            out += self._cached_news(f"al_{key}_{day}_{part}", b, lambda a=a, b=b: fetch(a, b))
+        return [i for i in out if not FILLER.search(i["title"])]
+
+    def news_by_ticker(self, tickers, start_ts, end_ts):
+        """{ticker: Alpaca headlines tagged with it, newest first} known by end_ts, counting only stories about
+        at most three companies (not earnings calendars or sector round-ups). Empty without an Alpaca key."""
+        wanted = sorted(set(tickers))
+        key = "names_" + hashlib.sha1(",".join(wanted).encode()).hexdigest()[:10]
+        items = [i for i in self._alpaca_day(key, wanted, clock.day_of(end_ts), 4) if len(i.get("symbols") or []) <= 3]
+        names, out = set(wanted), {}
+        for it in _dedupe(items, start_ts, end_ts, len(items)):
+            for tk in it["symbols"]:
+                if tk in names:
+                    out.setdefault(tk, []).append(it)
+        return out
+
     def news_market(self, start_ts, end_ts, limit=20):
         day = clock.day_of(end_ts)
         items = []
         for i, q in enumerate(GNEWS_MARKET):
             items += self._gnews_days(f"market{i}", q, day)
         items += [i for i in self._gdelt_day("gd_market", GDELT_MARKET, day) if _domain(i) in NEWS_DOMAINS]
+        # Index-tagged stories: economic releases against estimates, futures and the market's story of the day.
+        items += [i for i in self._alpaca_day("market", list(INDEX_ETFS), day, 2) if len(i.get("symbols") or []) <= 6]
         # Keep room for both: timed headlines from the last hours and date-only ones from the day before.
         timed = _dedupe([i for i in items if not i.get("coarse")], start_ts, end_ts, limit)
         dated = _dedupe([i for i in items if i.get("coarse")], start_ts, end_ts, limit)
@@ -389,6 +433,7 @@ class MarketData:
         items += self._gnews_days(f"t_{tk}", f"({quoted}) ({tk} OR stock OR shares)", day)
         gq = (f"({quoted})" if len(names) > 1 else quoted) + " sourcelang:english"
         items += [i for i in self._gdelt_day(f"gd_{tk}", gq, day) if _domain(i) not in JUNK_DOMAINS]
+        items += [i for i in self._alpaca_day(f"t_{tk}", [tk], day, 2, back_days=4) if len(i.get("symbols") or []) <= 4]
         filings = _dedupe([i for i in items if i.get("source") == "SEC EDGAR"], start_ts, end_ts, 5)
         rest = _dedupe([i for i in items if i.get("source") != "SEC EDGAR"], start_ts, end_ts, limit)
         return sorted(filings + rest, key=lambda i: -i["ts"])
@@ -517,6 +562,16 @@ thelincolnianonline.com wkrb13.com dailypolitical.com thecerbatgem.com theenterp
 modernreaders.com com-unik.info baseballnewssource.com thestockobserver.com tradingnewsdaily.com
 transcriptdaily.com sportsperspectives.com weekherald.com'''.split())
 
+# Benzinga's machine-made filler (valuation comparisons, "$1000 invested 5 years ago", options-flow and
+# short-interest digests, transcripts, "what's going on with X stock"): it would crowd out the stories that move
+# a stock.
+FILLER = re.compile(r"(\binvested\b.*\byears? ago\b|would have made owning|^in-depth analysis|^industry comparison"
+                    r"|(versus|to|against|compared to) competitors\b|industry competitors|^comparative study"
+                    r"|^how to earn \$|market-moving news for|transcript|p/e ratio"
+                    r"|price over earnings|short interest|options? (activity|trading trends|market dynamics|frenzy)"
+                    r"|smart money is betting|whale (activity|alert)|top analyst forecasts|^what'?s going on with"
+                    r"|^a look at|^a closer look|^peering into|^unpacking)", re.I)
+
 
 def _domain(item):
     d = (item.get("source") or "").lower()
@@ -564,6 +619,9 @@ class View:
 
     def sec_filings(self, tk, start_ts, end_ts):
         return self.data.sec_filings(tk, start_ts, min(end_ts, self.now))
+
+    def news_by_ticker(self, tickers, start_ts, end_ts):
+        return self.data.news_by_ticker(tickers, start_ts, min(end_ts, self.now))
 
 
 class LiveData(MarketData):
